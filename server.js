@@ -34,6 +34,7 @@ const PORT = process.env.PORT || 4900;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'bluex-dev-secret-troque-em-producao';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || null;
+app.set('trust proxy', 1);
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '6mb' })); // imagens em base64 pedem mais espaço que texto

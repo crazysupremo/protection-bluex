@@ -1,0 +1,22 @@
+{
+  "name": "protection-bluex-api",
+  "version": "0.1.0",
+  "description": "PROTECTION BLUEX (BLUE SPORTS GAMES) — API de verificação de idade, moderação de conteúdo e análise de comportamento suspeito, pra empresas clientes integrarem via chave de API.",
+  "main": "server.js",
+  "engines": {
+    "node": "22.x"
+  },
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-session": "^2.1.0",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
+    "uuid": "^9.0.1"
+  }
+}

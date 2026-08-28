@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PROTECTION BLUEX — Painel Admin</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <div id="login-screen">
+    <div class="login-card">
+      <h1>🔷 PROTECTION BLUEX</h1>
+      <p class="brand-sub">BLUE SPORTS GAMES</p>
+      <p>Painel administrativo — verificação de idade, moderação e análise de texto.</p>
+      <input type="password" id="login-password" placeholder="Senha de admin" autocomplete="current-password" />
+      <button id="btn-login">Entrar</button>
+      <div class="login-error" id="login-error"></div>
+    </div>
+  </div>
+
+  <div id="app-screen" class="hidden">
+    <div class="app-header">
+      <h1>🔷 PROTECTION BLUEX <span class="brand-badge">ADMIN</span></h1>
+      <button class="logout-btn" id="btn-logout">Sair</button>
+    </div>
+
+    <div class="health-row" id="health-row"></div>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="clients">Empresas clientes</button>
+      <button class="tab-btn" data-tab="usage">Uso recente</button>
+      <button class="tab-btn" data-tab="flagged">Casos sinalizados</button>
+    </div>
+
+    <div id="tab-clients" class="tab-content">
+      <div class="panel">
+        <h2>Nova empresa cliente</h2>
+        <div class="new-client-form">
+          <input type="text" name="company_name" id="new-client-name" placeholder="Nome da empresa" />
+          <input type="email" name="contact_email" id="new-client-email" placeholder="E-mail de contato (opcional)" />
+          <select id="new-client-plan">
+            <option value="trial">Trial</option>
+            <option value="basico">Básico</option>
+            <option value="pro">Pro</option>
+            <option value="enterprise">Enterprise</option>
+          </select>
+          <button id="btn-create-client">Criar cliente + gerar chave</button>
+        </div>
+        <div id="new-key-reveal"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Clientes cadastrados</h2>
+        <table id="clients-table">
+          <thead>
+            <tr><th>Empresa</th><th>Contato</th><th>Plano</th><th>Status</th><th>Desde</th><th>Ações</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty-hint hidden" id="clients-empty">Nenhuma empresa cadastrada ainda.</p>
+      </div>
+    </div>
+
+    <div id="tab-usage" class="tab-content hidden">
+      <div class="panel">
+        <h2>Últimas 200 chamadas de API</h2>
+        <table id="usage-table">
+          <thead><tr><th>Empresa</th><th>Endpoint</th><th>Sinalizado?</th><th>Duração</th><th>Quando</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty-hint hidden" id="usage-empty">Nenhuma chamada registrada ainda.</p>
+      </div>
+    </div>
+
+    <div id="tab-flagged" class="tab-content hidden">
+      <div class="panel">
+        <h2>Fila de revisão — casos sinalizados</h2>
+        <table id="flagged-table">
+          <thead><tr><th>Empresa</th><th>Endpoint</th><th>Categorias</th><th>Motivo</th><th>Quando</th><th>Ações</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty-hint hidden" id="flagged-empty">Nenhum caso sinalizado.</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="/admin.js"></script>
+</body>
+</html>

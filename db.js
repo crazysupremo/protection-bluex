@@ -74,12 +74,17 @@ async function initDb() {
       endpoint TEXT NOT NULL,
       categories TEXT,
       reason TEXT,
+      confidence TEXT,
       reviewed INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
 
   await ensureColumn('clients', 'contact_email TEXT');
+  // Adicionada quando o modo "bem rigoroso" passou a sinalizar também
+  // indícios ambíguos (confidence "baixa") em vez de só os óbvios — dá pra
+  // priorizar a fila de revisão pelos casos de confidence "alta" primeiro.
+  await ensureColumn('flagged_cases', 'confidence TEXT');
 
   console.log('[PROTECTION BLUEX] banco de dados pronto.');
 }

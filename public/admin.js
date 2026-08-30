@@ -71,6 +71,9 @@ async function loadHealth() {
     row.innerHTML = `
       <span class="health-pill ${health.groq_configured ? 'health-ok' : 'health-off'}">Groq (IA de análise): ${health.groq_configured ? 'configurado' : 'faltando GROQ_API_KEY'}</span>
       <span class="health-pill ${health.turso_configured ? 'health-ok' : 'health-off'}">Banco: ${health.turso_configured ? 'Turso (nuvem)' : 'SQLite local (some ao reiniciar)'}</span>
+      <span class="health-pill ${health.dual_model_vision ? 'health-ok' : 'health-neutral'}">Checagem dupla (imagem): ${health.dual_model_vision ? 'ativa' : 'desligada (1 modelo só)'}</span>
+      <span class="health-pill ${health.dual_model_text ? 'health-ok' : 'health-neutral'}">Checagem dupla (texto): ${health.dual_model_text ? 'ativa' : 'desligada (1 modelo só)'}</span>
+      <span class="health-pill health-neutral">Áudio e vídeo: moderação ativa</span>
     `;
   } catch (_) {}
 }
@@ -166,6 +169,7 @@ async function loadFlagged() {
       <td>${escapeHtml(r.company_name)}</td>
       <td class="mono">${escapeHtml(r.endpoint)}</td>
       <td>${escapeHtml(categories.join(', '))}</td>
+      <td>${escapeHtml(r.confidence || '—')}</td>
       <td>${escapeHtml(r.reason || '—')}</td>
       <td>${new Date(r.created_at).toLocaleString('pt-BR')}</td>
       <td>${r.reviewed ? '<span class="tag tag-active">Revisado</span>' : `<button class="small-btn" data-action="review" data-id="${r.id}">Marcar revisado</button>`}</td>

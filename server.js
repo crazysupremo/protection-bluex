@@ -248,34 +248,61 @@ async function callGroqTextOnce(model, promptText) {
 // flagged=true) — junta categorias sem repetir, e a confidence final é a
 // MAIOR das duas (uma sinalização "alta" nunca deve ser rebaixada por causa
 // do outro modelo não ter visto o mesmo risco).
+//
+// CORRIGIDO na revisão: essa função é reaproveitada tanto por
+// /v1/moderate-image e /v1/moderate-video (formato "flagged"/"categories")
+// quanto por /v1/age-verify (formato DIFERENTE: "flagged_as_minor"/
+// "estimated_age") — a versão anterior só sabia lidar com o primeiro
+// formato, então ligar a checagem dupla quebrava silenciosamente a
+// verificação de idade (sempre voltava estimated_age:null). Agora trata os
+// dois formatos.
 const CONFIDENCE_RANK = { baixa: 1, média: 2, media: 2, alta: 3 };
 function mergeResults(a, b) {
   if (!b) return a;
-  const flagged = !!a.flagged || !!b.flagged;
-  const categories = [...new Set([...(a.categories || []), ...(b.categories || [])])];
+  const merged = {};
+  if ('flagged' in a || 'flagged' in b) merged.flagged = !!a.flagged || !!b.flagged;
+  if ('flagged_as_minor' in a || 'flagged_as_minor' in b) merged.flagged_as_minor = !!a.flagged_as_minor || !!b.flagged_as_minor;
+  if ('categories' in a || 'categories' in b) {
+    merged.categories = [...new Set([...(a.categories || []), ...(b.categories || [])])];
+  }
+  if ('estimated_age' in a || 'estimated_age' in b) {
+    const ageA = a.estimated_age, ageB = b.estimated_age;
+    merged.estimated_age = ageA != null && ageB != null ? Math.round((ageA + ageB) / 2) : ageA ?? ageB ?? null;
+  }
   const confA = CONFIDENCE_RANK[a.confidence] || 0;
   const confB = CONFIDENCE_RANK[b.confidence] || 0;
-  const confidence = confB > confA ? b.confidence : a.confidence || b.confidence || 'baixa';
-  const reason = a.reason && b.reason && a.reason !== b.reason ? `${a.reason} / ${b.reason}` : a.reason || b.reason || null;
-  return { flagged, categories, confidence, reason };
+  merged.confidence = confB > confA ? b.confidence : a.confidence || b.confidence || 'baixa';
+  merged.reason = a.reason && b.reason && a.reason !== b.reason ? `${a.reason} / ${b.reason}` : a.reason || b.reason || null;
+  return merged;
 }
 
+// CORRIGIDO na revisão: usava Promise.all, que descarta TUDO se só uma das
+// duas chamadas falhar (ex: instabilidade de rede num dos dois modelos) —
+// mesmo que a outra tivesse funcionado normal, o resultado virava
+// "flagged:false" geral, na prática desligando a moderação por acaso.
+// Promise.allSettled deixa cada lado falhar sem derrubar o outro.
 async function callGroqVision(imageDataUrlOrUrl, promptText) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) return { flagged: false, skipped: true, error: 'GROQ_API_KEY não configurada' };
   const model1 = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b';
   const model2 = process.env.GROQ_VISION_MODEL_2 || null;
-  try {
-    if (!model2) return await callGroqVisionOnce(model1, imageDataUrlOrUrl, promptText);
-    const [r1, r2] = await Promise.all([
-      callGroqVisionOnce(model1, imageDataUrlOrUrl, promptText),
-      callGroqVisionOnce(model2, imageDataUrlOrUrl, promptText),
-    ]);
-    return mergeResults(r1, r2);
-  } catch (err) {
-    console.error('Erro na Groq Vision:', err.message);
-    return { flagged: false, error: true };
+  if (!model2) {
+    try {
+      return await callGroqVisionOnce(model1, imageDataUrlOrUrl, promptText);
+    } catch (err) {
+      console.error('Erro na Groq Vision:', err.message);
+      return { flagged: false, error: true };
+    }
   }
+  const [s1, s2] = await Promise.allSettled([
+    callGroqVisionOnce(model1, imageDataUrlOrUrl, promptText),
+    callGroqVisionOnce(model2, imageDataUrlOrUrl, promptText),
+  ]);
+  const r1 = s1.status === 'fulfilled' ? s1.value : { flagged: false, error: true };
+  const r2 = s2.status === 'fulfilled' ? s2.value : { flagged: false, error: true };
+  if (s1.status === 'rejected') console.error('Erro na Groq Vision (modelo 1):', s1.reason);
+  if (s2.status === 'rejected') console.error('Erro na Groq Vision (modelo 2):', s2.reason);
+  return mergeResults(r1, r2);
 }
 
 async function callGroqText(promptText) {
@@ -283,14 +310,20 @@ async function callGroqText(promptText) {
   if (!apiKey) return { flagged: false, skipped: true, error: 'GROQ_API_KEY não configurada' };
   const model1 = process.env.GROQ_TEXT_MODEL || 'llama-3.3-70b-versatile';
   const model2 = process.env.GROQ_TEXT_MODEL_2 || null;
-  try {
-    if (!model2) return await callGroqTextOnce(model1, promptText);
-    const [r1, r2] = await Promise.all([callGroqTextOnce(model1, promptText), callGroqTextOnce(model2, promptText)]);
-    return mergeResults(r1, r2);
-  } catch (err) {
-    console.error('Erro na Groq (texto):', err.message);
-    return { flagged: false, error: true };
+  if (!model2) {
+    try {
+      return await callGroqTextOnce(model1, promptText);
+    } catch (err) {
+      console.error('Erro na Groq (texto):', err.message);
+      return { flagged: false, error: true };
+    }
   }
+  const [s1, s2] = await Promise.allSettled([callGroqTextOnce(model1, promptText), callGroqTextOnce(model2, promptText)]);
+  const r1 = s1.status === 'fulfilled' ? s1.value : { flagged: false, error: true };
+  const r2 = s2.status === 'fulfilled' ? s2.value : { flagged: false, error: true };
+  if (s1.status === 'rejected') console.error('Erro na Groq (texto, modelo 1):', s1.reason);
+  if (s2.status === 'rejected') console.error('Erro na Groq (texto, modelo 2):', s2.reason);
+  return mergeResults(r1, r2);
 }
 
 // Transcrição de áudio (Whisper via Groq) — usada só por /v1/moderate-audio,

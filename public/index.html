@@ -31,6 +31,7 @@
       <button class="tab-btn active" data-tab="clients">Empresas clientes</button>
       <button class="tab-btn" data-tab="usage">Uso recente</button>
       <button class="tab-btn" data-tab="flagged">Casos sinalizados</button>
+      <button class="tab-btn" data-tab="security">Segurança</button>
     </div>
 
     <div id="tab-clients" class="tab-content">
@@ -97,6 +98,21 @@
           <span id="flagged-page-info" class="page-info"></span>
           <button class="small-btn" id="flagged-next">Próxima »</button>
         </div>
+      </div>
+    </div>
+
+    <div id="tab-security" class="tab-content hidden">
+      <div class="panel">
+        <h2>Trocar senha de admin</h2>
+        <p class="empty-hint">Depois de trocar aqui, essa passa a ser a senha usada pra entrar — não precisa mais mexer no ADMIN_PASSWORD do Render.</p>
+        <div class="new-client-form">
+          <input type="password" id="change-pw-current" placeholder="Senha atual" autocomplete="current-password" />
+          <input type="password" id="change-pw-new" placeholder="Nova senha (mínimo 8 caracteres)" autocomplete="new-password" />
+          <input type="password" id="change-pw-confirm" placeholder="Confirmar nova senha" autocomplete="new-password" />
+          <button id="btn-change-password">Salvar nova senha</button>
+        </div>
+        <div class="login-error" id="change-pw-error"></div>
+        <div class="login-error" id="change-pw-success" style="color: var(--ok);"></div>
       </div>
     </div>
   </div>

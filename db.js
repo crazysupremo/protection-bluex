@@ -86,6 +86,18 @@ async function initDb() {
   // priorizar a fila de revisão pelos casos de confidence "alta" primeiro.
   await ensureColumn('flagged_cases', 'confidence TEXT');
 
+  // Senha do admin trocável pelo próprio painel (aba "Segurança"), sem
+  // precisar mexer na variável de ambiente ADMIN_PASSWORD no Render. Linha
+  // única (id=1) — se não existir, o login ainda cai de volta pra
+  // ADMIN_PASSWORD (ver server.js), só pra não travar o primeiro acesso.
+  await run(`
+    CREATE TABLE IF NOT EXISTS admin_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      password_hash TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
   console.log('[PROTECTION BLUEX] banco de dados pronto.');
 }
 

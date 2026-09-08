@@ -76,6 +76,18 @@ qualquer string em `image`/`image_url`/`frames`, inclusive coisas como
 (`data:image/...;base64,...`) ou URL `http(s)://` — erro 400 claro antes de
 gastar uma chamada da Groq com lixo.
 
+### Senha do admin agora dá pra trocar pelo próprio painel
+Antes, a única forma de trocar a senha do admin era editando a variável
+`ADMIN_PASSWORD` no Render (Environment) e esperando o redeploy. Agora tem
+uma aba nova, **Segurança**, dentro do painel: entra com a senha atual +
+nova senha (mínimo 8 caracteres), e pronto — a senha nova fica salva com
+hash no banco (`admin_settings`, usando `scrypt`, nunca em texto puro) e
+passa a valer no lugar da `ADMIN_PASSWORD`. Enquanto ninguém troca pela
+primeira vez, o login continua caindo de volta pra `ADMIN_PASSWORD` (só
+serve de "bootstrap" do primeiro acesso). Se você já tinha uma senha
+configurada no Render e quer trocar agora: entra com ela, vai em
+Segurança, e cadastra a nova.
+
 ### Paginação e filtro por empresa no painel admin
 `/admin/usage` e `/admin/flagged` sempre devolviam só os últimos 200
 registros, sem jeito de navegar pro resto nem filtrar por empresa. Agora

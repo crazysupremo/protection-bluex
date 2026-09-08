@@ -231,4 +231,28 @@ document.getElementById('flagged-filter-client').onchange = () => { flaggedOffse
 document.getElementById('flagged-prev').onclick = () => { flaggedOffset = Math.max(0, flaggedOffset - PAGE_SIZE); loadFlagged(); };
 document.getElementById('flagged-next').onclick = () => { flaggedOffset += PAGE_SIZE; loadFlagged(); };
 
+// ---------- Segurança (trocar senha) ----------
+document.getElementById('btn-change-password').onclick = async () => {
+  const current_password = document.getElementById('change-pw-current').value;
+  const new_password = document.getElementById('change-pw-new').value;
+  const confirm = document.getElementById('change-pw-confirm').value;
+  const errEl = document.getElementById('change-pw-error');
+  const okEl = document.getElementById('change-pw-success');
+  errEl.textContent = '';
+  okEl.textContent = '';
+  if (new_password !== confirm) {
+    errEl.textContent = 'A nova senha e a confirmação não são iguais.';
+    return;
+  }
+  try {
+    await api('/admin/change-password', { method: 'POST', body: JSON.stringify({ current_password, new_password }) });
+    document.getElementById('change-pw-current').value = '';
+    document.getElementById('change-pw-new').value = '';
+    document.getElementById('change-pw-confirm').value = '';
+    okEl.textContent = 'Senha trocada com sucesso.';
+  } catch (err) {
+    errEl.textContent = err.message;
+  }
+};
+
 checkSession();

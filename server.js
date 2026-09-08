@@ -76,6 +76,25 @@ function passwordMatches(attempt, expected) {
   return crypto.timingSafeEqual(attemptBuf, expectedBuf);
 }
 
+// ---------- Senha do admin trocável (guardada com hash no banco) ----------
+// Usa scrypt (nativo do Node, sem dependência extra) em vez de guardar a
+// senha em texto puro. Formato salvo: "salt:hash", ambos em hex.
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyHashedPassword(attempt, stored) {
+  const [salt, hash] = String(stored || '').split(':');
+  if (!salt || !hash) return false;
+  const attemptHash = crypto.scryptSync(String(attempt || ''), salt, 64).toString('hex');
+  const hashBuf = Buffer.from(hash, 'hex');
+  const attemptBuf = Buffer.from(attemptHash, 'hex');
+  if (hashBuf.length !== attemptBuf.length) return false;
+  return crypto.timingSafeEqual(hashBuf, attemptBuf);
+}
+
 // ---------- Proteção contra SSRF em audio_url/image_url ----------
 // Como /v1/moderate-audio baixa o áudio de audio_url DIRETO no nosso
 // servidor (diferente de image_url, que é repassada pra Groq buscar), uma
@@ -142,11 +161,24 @@ app.post(
   '/admin/login',
   adminLoginLimiter,
   asyncHandler(async (req, res) => {
-    if (!ADMIN_PASSWORD) {
+    const { password } = req.body || {};
+    if (!password || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Informe a senha.' });
+    }
+    // A senha trocada pelo painel (aba Segurança) fica no banco e tem
+    // prioridade. Enquanto ninguém trocou ainda, cai de volta pra
+    // ADMIN_PASSWORD (variável de ambiente) — é só o bootstrap do primeiro
+    // acesso.
+    const stored = await db.get('SELECT password_hash FROM admin_settings WHERE id = 1');
+    let ok;
+    if (stored) {
+      ok = verifyHashedPassword(password, stored.password_hash);
+    } else if (ADMIN_PASSWORD) {
+      ok = passwordMatches(password, ADMIN_PASSWORD);
+    } else {
       return res.status(500).json({ error: 'ADMIN_PASSWORD não configurada no servidor. Veja o README.' });
     }
-    const { password } = req.body || {};
-    if (!passwordMatches(password, ADMIN_PASSWORD)) return res.status(401).json({ error: 'Senha incorreta.' });
+    if (!ok) return res.status(401).json({ error: 'Senha incorreta.' });
     req.session.isAdmin = true;
     res.json({ ok: true });
   })
@@ -160,6 +192,34 @@ app.post('/admin/logout', (req, res) => {
 app.get('/admin/me', (req, res) => {
   res.json({ isAdmin: !!(req.session && req.session.isAdmin) });
 });
+
+app.post(
+  '/admin/change-password',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { current_password, new_password } = req.body || {};
+    if (!new_password || typeof new_password !== 'string' || new_password.length < 8) {
+      return res.status(400).json({ error: 'A nova senha precisa ter pelo menos 8 caracteres.' });
+    }
+    const stored = await db.get('SELECT password_hash FROM admin_settings WHERE id = 1');
+    let currentOk;
+    if (stored) {
+      currentOk = verifyHashedPassword(current_password, stored.password_hash);
+    } else if (ADMIN_PASSWORD) {
+      currentOk = passwordMatches(current_password, ADMIN_PASSWORD);
+    } else {
+      currentOk = false;
+    }
+    if (!currentOk) return res.status(401).json({ error: 'Senha atual incorreta.' });
+    const newHash = hashPassword(new_password);
+    await db.run(
+      `INSERT INTO admin_settings (id, password_hash, updated_at) VALUES (1, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at`,
+      [newHash]
+    );
+    res.json({ ok: true });
+  })
+);
 
 // ---------- GESTÃO DE EMPRESAS CLIENTES (painel admin) ----------
 app.get(

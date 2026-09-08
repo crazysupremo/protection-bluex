@@ -64,23 +64,39 @@
 
     <div id="tab-usage" class="tab-content hidden">
       <div class="panel">
-        <h2>Últimas 200 chamadas de API</h2>
+        <h2>Chamadas de API</h2>
+        <div class="filter-row">
+          <select id="usage-filter-client"><option value="">Todas as empresas</option></select>
+        </div>
         <table id="usage-table">
           <thead><tr><th>Empresa</th><th>Endpoint</th><th>Sinalizado?</th><th>Duração</th><th>Quando</th></tr></thead>
           <tbody></tbody>
         </table>
         <p class="empty-hint hidden" id="usage-empty">Nenhuma chamada registrada ainda.</p>
+        <div class="pagination">
+          <button class="small-btn" id="usage-prev">« Anterior</button>
+          <span id="usage-page-info" class="page-info"></span>
+          <button class="small-btn" id="usage-next">Próxima »</button>
+        </div>
       </div>
     </div>
 
     <div id="tab-flagged" class="tab-content hidden">
       <div class="panel">
         <h2>Fila de revisão — casos sinalizados</h2>
+        <div class="filter-row">
+          <select id="flagged-filter-client"><option value="">Todas as empresas</option></select>
+        </div>
         <table id="flagged-table">
           <thead><tr><th>Empresa</th><th>Endpoint</th><th>Categorias</th><th>Confiança</th><th>Motivo</th><th>Quando</th><th>Ações</th></tr></thead>
           <tbody></tbody>
         </table>
         <p class="empty-hint hidden" id="flagged-empty">Nenhum caso sinalizado.</p>
+        <div class="pagination">
+          <button class="small-btn" id="flagged-prev">« Anterior</button>
+          <span id="flagged-page-info" class="page-info"></span>
+          <button class="small-btn" id="flagged-next">Próxima »</button>
+        </div>
       </div>
     </div>
   </div>

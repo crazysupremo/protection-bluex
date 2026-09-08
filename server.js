@@ -23,10 +23,11 @@ const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cookieSession = require('cookie-session');
-const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const path = require('path');
+const dns = require('dns').promises;
+const net = require('net');
 const db = require('./db');
 
 const app = express();
@@ -63,6 +64,64 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+// Compara senha em tempo constante — evita que a diferença de tempo de
+// resposta vaze quantos caracteres do início a senha tentada acertou.
+function passwordMatches(attempt, expected) {
+  const attemptBuf = Buffer.from(String(attempt || ''));
+  const expectedBuf = Buffer.from(String(expected || ''));
+  if (attemptBuf.length !== expectedBuf.length) {
+    crypto.timingSafeEqual(expectedBuf, expectedBuf); // mantém o tempo constante mesmo no caminho "tamanho diferente"
+    return false;
+  }
+  return crypto.timingSafeEqual(attemptBuf, expectedBuf);
+}
+
+// ---------- Proteção contra SSRF em audio_url/image_url ----------
+// Como /v1/moderate-audio baixa o áudio de audio_url DIRETO no nosso
+// servidor (diferente de image_url, que é repassada pra Groq buscar), uma
+// empresa cliente mal-intencionada (ou com a chave de API vazada) poderia
+// tentar usar isso pra sondar rede interna (ex: metadata endpoint de nuvem,
+// serviços internos). Resolve o hostname e bloqueia IPs privados/loopback/
+// link-local antes de buscar.
+function isPrivateOrReservedIp(ip) {
+  if (net.isIP(ip) === 4) {
+    const [a, b] = ip.split('.').map(Number);
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return false;
+  }
+  if (net.isIP(ip) === 6) {
+    const lower = ip.toLowerCase();
+    if (lower === '::1' || lower === '::') return true;
+    if (lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd')) return true;
+    if (lower.startsWith('::ffff:')) {
+      const v4 = lower.split(':').pop();
+      if (net.isIP(v4) === 4) return isPrivateOrReservedIp(v4);
+    }
+    return false;
+  }
+  return true; // não reconhecido como IP válido -> trata como inseguro
+}
+
+async function isSafeExternalUrl(urlStr) {
+  let parsed;
+  try {
+    parsed = new URL(urlStr);
+  } catch (_) {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (parsed.hostname === 'localhost') return false;
+  try {
+    const { address } = await dns.lookup(parsed.hostname);
+    return !isPrivateOrReservedIp(address);
+  } catch (_) {
+    return false;
+  }
+}
+
 // ---------- AUTENTICAÇÃO POR CHAVE DE API (empresas clientes) ----------
 async function requireApiKey(req, res, next) {
   const key = req.header('X-API-Key') || (req.query && req.query.api_key);
@@ -87,7 +146,7 @@ app.post(
       return res.status(500).json({ error: 'ADMIN_PASSWORD não configurada no servidor. Veja o README.' });
     }
     const { password } = req.body || {};
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Senha incorreta.' });
+    if (!passwordMatches(password, ADMIN_PASSWORD)) return res.status(401).json({ error: 'Senha incorreta.' });
     req.session.isAdmin = true;
     res.json({ ok: true });
   })
@@ -150,17 +209,30 @@ app.post(
   })
 );
 
+// Lê limit/offset/client_id da query string com valores seguros (limit
+// capado em 200 pra não deixar o admin pedir uma página gigante).
+function parsePagination(req) {
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+  const clientId = req.query.client_id && String(req.query.client_id).trim() ? String(req.query.client_id).trim() : null;
+  return { limit, offset, clientId };
+}
+
 app.get(
   '/admin/usage',
   requireAdmin,
   asyncHandler(async (req, res) => {
-    res.json(
-      await db.all(
-        `SELECT u.id, u.endpoint, u.flagged, u.duration_ms, u.created_at, c.company_name
-         FROM usage_logs u JOIN clients c ON c.id = u.client_id
-         ORDER BY u.created_at DESC LIMIT 200`
-      )
+    const { limit, offset, clientId } = parsePagination(req);
+    const where = clientId ? 'WHERE u.client_id = ?' : '';
+    const args = clientId ? [clientId] : [];
+    const total = await db.get(`SELECT COUNT(*) as count FROM usage_logs u ${where}`, args);
+    const rows = await db.all(
+      `SELECT u.id, u.endpoint, u.flagged, u.duration_ms, u.created_at, c.company_name
+       FROM usage_logs u JOIN clients c ON c.id = u.client_id
+       ${where} ORDER BY u.created_at DESC LIMIT ? OFFSET ?`,
+      [...args, limit, offset]
     );
+    res.json({ rows, total: total ? total.count : 0, limit, offset });
   })
 );
 
@@ -168,13 +240,17 @@ app.get(
   '/admin/flagged',
   requireAdmin,
   asyncHandler(async (req, res) => {
-    res.json(
-      await db.all(
-        `SELECT f.id, f.endpoint, f.categories, f.reason, f.confidence, f.reviewed, f.created_at, c.company_name
-         FROM flagged_cases f JOIN clients c ON c.id = f.client_id
-         ORDER BY f.created_at DESC LIMIT 200`
-      )
+    const { limit, offset, clientId } = parsePagination(req);
+    const where = clientId ? 'WHERE f.client_id = ?' : '';
+    const args = clientId ? [clientId] : [];
+    const total = await db.get(`SELECT COUNT(*) as count FROM flagged_cases f ${where}`, args);
+    const rows = await db.all(
+      `SELECT f.id, f.endpoint, f.categories, f.reason, f.confidence, f.reviewed, f.created_at, c.company_name
+       FROM flagged_cases f JOIN clients c ON c.id = f.client_id
+       ${where} ORDER BY f.created_at DESC LIMIT ? OFFSET ?`,
+      [...args, limit, offset]
     );
+    res.json({ rows, total: total ? total.count : 0, limit, offset });
   })
 );
 
@@ -342,6 +418,9 @@ async function transcribeAudio(audioDataUrlOrUrl) {
       contentType = match[1];
       buffer = Buffer.from(match[2], 'base64');
     } else {
+      if (!(await isSafeExternalUrl(audioDataUrlOrUrl))) {
+        return { text: '', error: 'URL de áudio inválida ou aponta pra um destino não permitido' };
+      }
       const fileRes = await fetch(audioDataUrlOrUrl);
       if (!fileRes.ok) return { text: '', error: 'Não consegui baixar o áudio da URL' };
       contentType = fileRes.headers.get('content-type') || 'audio/ogg';
@@ -398,11 +477,17 @@ async function logFlagged(clientId, endpoint, categories, reason, confidence) {
   }
 }
 
+// Aceita só data URL de imagem ou URL http(s) — evita mandar lixo pra Groq
+// (desperdiçando a chamada) e barra esquemas como file:// de cara.
+function isValidImageValue(value) {
+  return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(value) || /^https?:\/\//i.test(value);
+}
+
 function extractImage(body) {
   if (!body) return null;
-  if (body.image && typeof body.image === 'string') return body.image;
-  if (body.image_url && typeof body.image_url === 'string') return body.image_url;
-  return null;
+  const value = typeof body.image === 'string' ? body.image : typeof body.image_url === 'string' ? body.image_url : null;
+  if (!value || !isValidImageValue(value)) return null;
+  return value;
 }
 
 // ---------- V1: VERIFICAÇÃO DE IDADE ----------
@@ -557,6 +642,9 @@ app.post(
     }
     if (frames.length > MAX_VIDEO_FRAMES) {
       return res.status(400).json({ error: `Máximo de ${MAX_VIDEO_FRAMES} frames por requisição.` });
+    }
+    if (frames.some((f) => typeof f !== 'string' || !isValidImageValue(f))) {
+      return res.status(400).json({ error: 'Cada item de "frames" precisa ser uma data URL de imagem ou uma URL http(s).' });
     }
     const results = await Promise.all(
       frames.map(async (frame, index) => {

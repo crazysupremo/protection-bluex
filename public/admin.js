@@ -79,8 +79,27 @@ async function loadHealth() {
 }
 
 // ---------- Clientes ----------
+let cachedClients = [];
+
+function populateClientFilters() {
+  ['usage-filter-client', 'flagged-filter-client'].forEach((id) => {
+    const select = document.getElementById(id);
+    const current = select.value;
+    select.innerHTML = '<option value="">Todas as empresas</option>';
+    cachedClients.forEach((c) => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.company_name;
+      select.appendChild(opt);
+    });
+    select.value = current;
+  });
+}
+
 async function loadClients() {
   const clients = await api('/admin/clients');
+  cachedClients = clients;
+  populateClientFilters();
   const tbody = document.querySelector('#clients-table tbody');
   tbody.innerHTML = '';
   document.getElementById('clients-empty').classList.toggle('hidden', clients.length > 0);
@@ -136,9 +155,25 @@ document.getElementById('btn-create-client').onclick = async () => {
   }
 };
 
+// ---------- Paginação compartilhada ----------
+const PAGE_SIZE = 50;
+
+function updatePaginationControls(prefix, offset, total) {
+  document.getElementById(`${prefix}-prev`).disabled = offset === 0;
+  document.getElementById(`${prefix}-next`).disabled = offset + PAGE_SIZE >= total;
+  const from = total === 0 ? 0 : offset + 1;
+  const to = Math.min(offset + PAGE_SIZE, total);
+  document.getElementById(`${prefix}-page-info`).textContent = `${from}–${to} de ${total}`;
+}
+
 // ---------- Uso ----------
+let usageOffset = 0;
+
 async function loadUsage() {
-  const rows = await api('/admin/usage');
+  const clientId = document.getElementById('usage-filter-client').value;
+  const params = new URLSearchParams({ limit: PAGE_SIZE, offset: usageOffset });
+  if (clientId) params.set('client_id', clientId);
+  const { rows, total } = await api('/admin/usage?' + params.toString());
   const tbody = document.querySelector('#usage-table tbody');
   tbody.innerHTML = '';
   document.getElementById('usage-empty').classList.toggle('hidden', rows.length > 0);
@@ -153,11 +188,21 @@ async function loadUsage() {
     `;
     tbody.appendChild(tr);
   });
+  updatePaginationControls('usage', usageOffset, total);
 }
 
+document.getElementById('usage-filter-client').onchange = () => { usageOffset = 0; loadUsage(); };
+document.getElementById('usage-prev').onclick = () => { usageOffset = Math.max(0, usageOffset - PAGE_SIZE); loadUsage(); };
+document.getElementById('usage-next').onclick = () => { usageOffset += PAGE_SIZE; loadUsage(); };
+
 // ---------- Casos sinalizados ----------
+let flaggedOffset = 0;
+
 async function loadFlagged() {
-  const rows = await api('/admin/flagged');
+  const clientId = document.getElementById('flagged-filter-client').value;
+  const params = new URLSearchParams({ limit: PAGE_SIZE, offset: flaggedOffset });
+  if (clientId) params.set('client_id', clientId);
+  const { rows, total } = await api('/admin/flagged?' + params.toString());
   const tbody = document.querySelector('#flagged-table tbody');
   tbody.innerHTML = '';
   document.getElementById('flagged-empty').classList.toggle('hidden', rows.length > 0);
@@ -176,9 +221,14 @@ async function loadFlagged() {
     `;
     tbody.appendChild(tr);
   });
+  updatePaginationControls('flagged', flaggedOffset, total);
   tbody.querySelectorAll('[data-action="review"]').forEach((btn) => {
     btn.onclick = async () => { await api('/admin/flagged/' + btn.dataset.id + '/review', { method: 'POST' }); loadFlagged(); };
   });
 }
+
+document.getElementById('flagged-filter-client').onchange = () => { flaggedOffset = 0; loadFlagged(); };
+document.getElementById('flagged-prev').onclick = () => { flaggedOffset = Math.max(0, flaggedOffset - PAGE_SIZE); loadFlagged(); };
+document.getElementById('flagged-next').onclick = () => { flaggedOffset += PAGE_SIZE; loadFlagged(); };
 
 checkSession();

@@ -256,3 +256,76 @@ document.getElementById('btn-change-password').onclick = async () => {
 };
 
 checkSession();
+
+
+// ---------- ABA VERIFICAÇÃO (status, teste do Shield, teste de moderação) ----------
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const badge = (ok, yes, no) => `<span style="color:${ok ? 'var(--ok)' : 'var(--danger)'};font-weight:700;">${ok ? '✔ ' + yes : '✖ ' + no}</span>`;
+
+  async function loadVerify() {
+    try {
+      const d = await api('/admin/system-check');
+      const sh = d.shield || {};
+      const rows = [
+        ['Servidor no ar', badge(true, 'online há ' + Math.floor(d.uptime_s / 60) + ' min', '')],
+        ['Banco de dados', badge(d.db_ok, 'conectado', 'sem conexão')],
+        ['BLUEX SHIELD', badge(sh.active, 'ativo' + (sh.underAttack ? ' (⚠ sob ataque)' : ''), 'DESLIGADO (BLUEX_SHIELD=off ou não instalado)')],
+        ['IA de moderação (Groq)', badge(d.groq_configured, 'chave configurada', 'GROQ_API_KEY ausente')],
+        ['Checagem dupla (2 modelos)', badge(d.dual_model_vision && d.dual_model_text, 'ligada', 'só 1 modelo (visão ' + (d.dual_model_vision ? 'ok' : 'não') + ' / texto ' + (d.dual_model_text ? 'ok' : 'não') + ')')],
+        ['Modelos', escapeHtml(d.vision_model + ' · ' + d.text_model)],
+        ['Admin protegido', badge(d.admin_configured, 'senha configurada', 'sem ADMIN_PASSWORD')],
+        ['Empresas / usos / sinalizados', d.totals ? `${d.totals.clients} / ${d.totals.usage} / ${d.totals.flagged} (não verificados: ${d.totals.unverified})` : '—'],
+        ['Node', escapeHtml(d.node)],
+      ];
+      $('vf-status').innerHTML = '<table><tbody>' + rows.map((r) => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('') + '</tbody></table>';
+      const banned = sh.banned || [];
+      $('vf-banned').innerHTML = banned.length
+        ? '<table><tbody>' + banned.map((b) => `<tr><td class="mono">${escapeHtml(b.ip)}</td><td>${b.minutesLeft} min restantes</td><td><button class="small-btn" data-unban="${escapeHtml(b.ip)}">Liberar</button></td></tr>`).join('') + '</tbody></table>'
+        : 'Nenhum IP banido agora ✔';
+      $('vf-banned').querySelectorAll('[data-unban]').forEach((b) => (b.onclick = async () => {
+        await api('/admin/shield/unban', { method: 'POST', body: JSON.stringify({ ip: b.dataset.unban }) });
+        loadVerify();
+      }));
+    } catch (e) {
+      $('vf-status').textContent = 'Erro: ' + e.message;
+    }
+  }
+
+  function modResult(r) {
+    const color = r.unverified ? '#f0b232' : r.flagged ? 'var(--danger)' : 'var(--ok)';
+    const title = r.unverified ? '⚠ NÃO VERIFICADO (IA indisponível — foi pra fila de revisão)' : r.flagged ? '🚩 SINALIZADO' : '✔ LIMPO';
+    return `<div style="border:1px solid ${color};border-radius:8px;padding:10px 12px;">
+      <strong style="color:${color};">${title}</strong> <span class="empty-hint">(${r.ms} ms)</span><br>
+      Categorias: ${escapeHtml((r.categories || []).join(', ') || '—')} · Confiança: ${escapeHtml(r.confidence)}<br>
+      Motivo: ${escapeHtml(r.reason || '—')}</div>`;
+  }
+
+  $('vf-refresh').onclick = loadVerify;
+  $('vf-shield-test').onclick = async () => {
+    const box = $('vf-shield-results');
+    box.textContent = 'Rodando...';
+    try {
+      const d = await api('/admin/shield/self-test', { method: 'POST', body: '{}' });
+      box.innerHTML = `<div style="font-weight:700;margin-bottom:6px;color:${d.ok ? 'var(--ok)' : 'var(--danger)'};">${d.ok ? '✔ Todos os testes passaram' : '✖ Algum teste falhou'}</div>` +
+        '<table><tbody>' + d.results.map((x) => `<tr><td>${x.pass ? '✔' : '✖'}</td><td>${escapeHtml(x.name)}</td><td class="empty-hint">${escapeHtml(x.detail)}</td></tr>`).join('') + '</tbody></table>';
+    } catch (e) { box.textContent = 'Erro: ' + e.message; }
+  };
+  $('vf-text-btn').onclick = async () => {
+    const box = $('vf-text-result');
+    box.textContent = 'Analisando...';
+    try { box.innerHTML = modResult(await api('/admin/test-text', { method: 'POST', body: JSON.stringify({ text: $('vf-text').value }) })); }
+    catch (e) { box.textContent = 'Erro: ' + e.message; }
+  };
+  $('vf-img-btn').onclick = async () => {
+    const box = $('vf-img-result');
+    const f = $('vf-img').files[0];
+    if (!f) { box.textContent = 'Escolha uma imagem.'; return; }
+    box.textContent = 'Analisando...';
+    try {
+      const image = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = no; r.readAsDataURL(f); });
+      box.innerHTML = modResult(await api('/admin/test-image', { method: 'POST', body: JSON.stringify({ image }) }));
+    } catch (e) { box.textContent = 'Erro: ' + e.message; }
+  };
+  document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click', () => { if (b.dataset.tab === 'verify') loadVerify(); }));
+})();

@@ -747,6 +747,119 @@ app.post(
 // câmera de loja, não plataformas online), por isso é vendido como produto
 // à parte, não como mais um endpoint aqui dentro.
 
+
+// ---------- VERIFICAÇÃO DO SISTEMA (página /verificacao.html) ----------
+// Tudo aqui exige login de admin. Serve pra VER o Shield e a moderação
+// funcionando sem precisar atacar nem montar cliente de API.
+const SHIELD_SYMBOL = Symbol.for('bluex.shield.patched');
+const bootTime = Date.now();
+
+app.get(
+  '/admin/system-check',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const shield = global[SHIELD_SYMBOL];
+    let dbOk = false;
+    try {
+      await db.get('SELECT 1 as ok');
+      dbOk = true;
+    } catch (_) {}
+    const totals = dbOk
+      ? {
+          clients: ((await db.get('SELECT COUNT(*) as c FROM clients')) || {}).c || 0,
+          usage: ((await db.get('SELECT COUNT(*) as c FROM usage_logs')) || {}).c || 0,
+          flagged: ((await db.get('SELECT COUNT(*) as c FROM flagged_cases')) || {}).c || 0,
+          unverified: ((await db.get("SELECT COUNT(*) as c FROM flagged_cases WHERE categories LIKE '%nao_verificado%'")) || {}).c || 0,
+        }
+      : null;
+    res.json({
+      uptime_s: Math.round((Date.now() - bootTime) / 1000),
+      node: process.version,
+      db_ok: dbOk,
+      totals,
+      groq_configured: !!process.env.GROQ_API_KEY,
+      dual_model_vision: !!process.env.GROQ_VISION_MODEL_2,
+      dual_model_text: !!process.env.GROQ_TEXT_MODEL_2,
+      vision_model: process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b',
+      text_model: process.env.GROQ_TEXT_MODEL || 'llama-3.3-70b-versatile',
+      turso_configured: !!process.env.TURSO_DATABASE_URL,
+      admin_configured: !!ADMIN_PASSWORD,
+      shield: shield ? { active: true, ...shield.stats() } : { active: false },
+    });
+  })
+);
+
+// Teste do Shield num "mini-servidor" separado (em memória): não bane ninguém
+// de verdade nem mexe no tráfego real.
+app.post(
+  '/admin/shield/self-test',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { createShield } = require('./bluex-shield');
+    const t = createShield({ log: false, trustProxy: 'none', maxPerWindow: 100 });
+    const fake = (ip, url, method) => ({
+      url: url || '/',
+      method: method || 'GET',
+      headers: { 'user-agent': 'teste' },
+      socket: { remoteAddress: ip },
+    });
+    const results = [];
+    // 1) Uso normal
+    let okNormal = 0;
+    for (let i = 0; i < 20; i++) if (t.checkRequest(fake('10.9.0.1')).ok) okNormal++;
+    results.push({ name: 'Uso normal (20 pedidos)', pass: okNormal === 20, detail: okNormal + '/20 liberados' });
+    // 2) Flood
+    let pass = 0, blocked = 0;
+    for (let i = 0; i < 400; i++) (t.checkRequest(fake('10.9.0.2')).ok ? pass++ : blocked++);
+    results.push({ name: 'Flood de 400 pedidos de um IP', pass: blocked > 0 && pass <= 100, detail: pass + ' passaram, ' + blocked + ' bloqueados (limite do teste: 100)' });
+    // 3) Ban
+    results.push({ name: 'IP do flood foi banido', pass: t.stats().banned.some((b) => b.ip === '10.9.0.2'), detail: JSON.stringify(t.stats().banned.map((b) => b.ip + ' ' + b.minutesLeft + 'min')) });
+    // 4) IP diferente continua normal
+    results.push({ name: 'Outro IP continua liberado', pass: t.checkRequest(fake('10.9.0.3')).ok, detail: 'não é afetado pelo ban do vizinho' });
+    // 5) Scanner
+    let r;
+    for (let i = 0; i < 3; i++) r = t.checkRequest(fake('10.9.0.4', i % 2 ? '/.env' : '/wp-login.php'));
+    results.push({ name: 'Scanner procurando /.env e /wp-login', pass: !r.ok, detail: r.ok ? 'não bloqueou' : 'bloqueado (' + r.reason + ')' });
+    // 6) Unban
+    t.unban('10.9.0.2');
+    results.push({ name: 'Liberar IP banido (unban)', pass: t.checkRequest(fake('10.9.0.2')).ok, detail: 'IP voltou a ser aceito' });
+    res.json({ ok: results.every((x) => x.pass), results });
+  })
+);
+
+app.post('/admin/shield/unban', requireAdmin, (req, res) => {
+  const shield = global[SHIELD_SYMBOL];
+  const ip = (req.body && req.body.ip) || '';
+  if (!shield || !ip) return res.status(400).json({ error: 'Informe o IP.' });
+  shield.unban(ip);
+  res.json({ ok: true });
+});
+
+// Testes de moderação direto do painel (sem chave de API de cliente, não entra no uso/fatura).
+app.post(
+  '/admin/test-text',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const text = req.body && typeof req.body.text === 'string' ? req.body.text.trim() : '';
+    if (!text) return res.status(400).json({ error: 'Escreva um texto.' });
+    const start = Date.now();
+    const result = await callGroqText(ANALYZE_TEXT_PROMPT_PREFIX + text.slice(0, 3000) + '---');
+    res.json({ unverified: isUnverified(result), flagged: !!result.flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null, ms: Date.now() - start });
+  })
+);
+
+app.post(
+  '/admin/test-image',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const image = extractImage(req.body);
+    if (!image) return res.status(400).json({ error: 'Envie uma imagem.' });
+    const start = Date.now();
+    const result = await callGroqVision(image, MODERATE_IMAGE_PROMPT);
+    res.json({ unverified: isUnverified(result), flagged: !!result.flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null, ms: Date.now() - start });
+  })
+);
+
 app.get('/health', (req, res) => {
   res.json({
     ok: true,

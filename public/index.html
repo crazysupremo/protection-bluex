@@ -32,6 +32,7 @@
       <button class="tab-btn" data-tab="usage">Uso recente</button>
       <button class="tab-btn" data-tab="flagged">Casos sinalizados</button>
       <button class="tab-btn" data-tab="security">Segurança</button>
+      <button class="tab-btn" data-tab="verify">🛡️ Verificação</button>
     </div>
 
     <div id="tab-clients" class="tab-content">
@@ -113,6 +114,38 @@
         </div>
         <div class="login-error" id="change-pw-error"></div>
         <div class="login-error" id="change-pw-success" style="color: var(--ok);"></div>
+      </div>
+    </div>
+
+    <div id="tab-verify" class="tab-content hidden">
+      <div class="panel">
+        <h2>Estado do sistema</h2>
+        <div id="vf-status" class="empty-hint">Carregando...</div>
+        <button class="small-btn" id="vf-refresh" style="margin-top:10px;">↻ Atualizar</button>
+      </div>
+      <div class="panel">
+        <h2>🛡️ BLUEX SHIELD — teste automático</h2>
+        <p class="empty-hint">Simula flood, scanner e ban num mini-servidor de teste. Não bane ninguém de verdade nem afeta o tráfego real.</p>
+        <button class="small-btn" id="vf-shield-test">▶ Rodar teste do Shield</button>
+        <div id="vf-shield-results" style="margin-top:12px;"></div>
+        <h2 style="margin-top:18px;">IPs banidos agora</h2>
+        <div id="vf-banned" class="empty-hint">—</div>
+      </div>
+      <div class="panel">
+        <h2>🧠 Moderação de texto — teste</h2>
+        <div class="new-client-form">
+          <input type="text" id="vf-text" placeholder="Digite uma mensagem pra analisar (ex.: oi, quantos anos você tem? me manda foto)" />
+          <button id="vf-text-btn">Analisar</button>
+        </div>
+        <div id="vf-text-result" style="margin-top:10px;"></div>
+      </div>
+      <div class="panel">
+        <h2>🖼️ Moderação de imagem — teste</h2>
+        <div class="new-client-form">
+          <input type="file" id="vf-img" accept="image/*" />
+          <button id="vf-img-btn">Analisar imagem</button>
+        </div>
+        <div id="vf-img-result" style="margin-top:10px;"></div>
       </div>
     </div>
   </div>

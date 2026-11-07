@@ -106,3 +106,11 @@ Casos sinalizados.
   `/v1/moderate-image` e `/v1/analyze-text` agora respondem `"unverified": true` (antes diziam
   "limpo") e o caso vai pra fila de revisão com a categoria `nao_verificado`.
   A empresa cliente deve tratar `unverified` como "segurar até revisar".
+
+## Aba "🛡️ Verificação" no painel admin
+
+Nova aba no painel (depois de Segurança): estado do sistema (servidor, banco, Shield, Groq,
+checagem dupla), **teste automático do Shield** (simula flood/scanner/ban sem afetar tráfego real),
+lista de IPs banidos com botão "Liberar", e **testes de moderação de texto e imagem** direto no painel.
+Rotas novas (todas exigem login de admin): `GET /admin/system-check`, `POST /admin/shield/self-test`,
+`POST /admin/shield/unban`, `POST /admin/test-text`, `POST /admin/test-image`.

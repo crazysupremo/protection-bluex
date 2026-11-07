@@ -860,6 +860,187 @@ app.post(
   })
 );
 
+
+// ---------- MONITOR DO BLUEX SHIELD ----------
+// Recebe o resumo por minuto dos sites protegidos (jogo do amigo etc.), mostra pro dono
+// (admin) e pro usuário do site, e devolve comandos de "derrubar/liberar IP".
+// PRIVACIDADE: nunca recebe/guarda dados de jogador — só contagens e IPs abusivos.
+const shieldReportLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+const shieldLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 15, standardHeaders: true, legacyHeaders: false });
+const LOCAL_SITE = 'local';
+const shieldLocal = () => global[Symbol.for('bluex.shield.patched')];
+const okIp = (v) => typeof v === 'string' && net.isIP(v) !== 0;
+const clip = (n, max) => Math.min(Math.max(parseInt(n, 10) || 0, 0), max);
+
+app.post(
+  '/shield/report',
+  shieldReportLimiter,
+  asyncHandler(async (req, res) => {
+    const b = req.body || {};
+    const key = typeof b.key === 'string' ? b.key : '';
+    const site = key ? await db.get('SELECT * FROM shield_sites WHERE site_key = ?', [key]) : null;
+    if (!site) return res.status(401).json({ error: 'Chave inválida.' });
+    const top = (Array.isArray(b.top) ? b.top : []).filter((x) => x && okIp(x.ip)).slice(0, 15).map((x) => ({ ip: x.ip, n: clip(x.n, 1e9) }));
+    const banned = (Array.isArray(b.banned) ? b.banned : []).filter((x) => x && okIp(x.ip)).slice(0, 30).map((x) => ({ ip: x.ip, minutesLeft: clip(x.minutesLeft, 1440), bans: clip(x.bans, 1000) }));
+    // Só categoria do motivo + IP abusivo. Qualquer outro campo é descartado.
+    const events = (Array.isArray(b.suspicious) ? b.suspicious : []).filter((x) => x && okIp(x.ip)).slice(-40).map((x) => ({ t: String(x.t || '').slice(0, 30), ip: x.ip, reason: String(x.reason || '').slice(0, 40), weight: clip(x.weight, 100000) }));
+    const level = ['normal', 'elevado', 'suspeito', 'extremo'].includes(b.level) ? b.level : 'normal';
+    await db.run(
+      'INSERT INTO shield_reports (id, site_id, at, total, blocked, new_bans, level, defense, top_json, banned_json, events_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [uuidv4(), site.id, new Date().toISOString(), clip(b.total, 1e9), clip(b.blocked, 1e9), clip(b.newBans, 1e9), level, clip(b.defense, 2), JSON.stringify(top), JSON.stringify(banned), JSON.stringify(events)]
+    );
+    await db.run("UPDATE shield_sites SET last_report_at = datetime('now') WHERE id = ?", [site.id]);
+    await db.run("DELETE FROM shield_reports WHERE site_id = ? AND at < ?", [site.id, new Date(Date.now() - 24 * 3600 * 1000).toISOString()]);
+    const cmds = await db.all('SELECT id, type, ip, minutes FROM shield_commands WHERE site_id = ? AND delivered_at IS NULL ORDER BY created_at LIMIT 50', [site.id]);
+    for (const c of cmds) await db.run("UPDATE shield_commands SET delivered_at = datetime('now') WHERE id = ?", [c.id]);
+    res.json({ ok: true, commands: cmds.map((c) => ({ type: c.type, ip: c.ip, minutes: c.minutes })) });
+  })
+);
+
+// Login do usuário de um site (ex.: seu amigo) — só enxerga o PRÓPRIO site.
+app.post(
+  '/shield/login',
+  shieldLoginLimiter,
+  asyncHandler(async (req, res) => {
+    const { username, password } = req.body || {};
+    const u = username ? await db.get('SELECT * FROM shield_users WHERE username = ?', [String(username).trim().toLowerCase()]) : null;
+    if (!u || !verifyHashedPassword(password, u.password_hash)) return res.status(401).json({ error: 'Usuário ou senha incorretos.' });
+    req.session.siteId = u.site_id;
+    req.session.siteUser = u.username;
+    res.json({ ok: true });
+  })
+);
+app.post('/shield/logout', (req, res) => {
+  if (req.session) { delete req.session.siteId; delete req.session.siteUser; }
+  res.json({ ok: true });
+});
+app.get('/shield/whoami', asyncHandler(async (req, res) => {
+  if (req.session && req.session.isAdmin) return res.json({ role: 'admin' });
+  if (req.session && req.session.siteId) {
+    const s = await db.get('SELECT id, name FROM shield_sites WHERE id = ?', [req.session.siteId]);
+    if (s) return res.json({ role: 'site', site: s, username: req.session.siteUser });
+  }
+  res.json({ role: null });
+}));
+
+// Dono (admin) OU usuário do site. Devolve o site permitido.
+async function resolveSite(req, res) {
+  const wanted = String(req.query.site || (req.body && req.body.site) || '');
+  if (req.session && req.session.isAdmin) return wanted || LOCAL_SITE;
+  if (req.session && req.session.siteId) return req.session.siteId;
+  res.status(401).json({ error: 'Não autenticado.' });
+  return null;
+}
+
+app.get(
+  '/monitor/sites',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const rows = await db.all('SELECT id, name, last_report_at, created_at FROM shield_sites ORDER BY created_at');
+    const out = [];
+    for (const r of rows) {
+      const last = await db.get('SELECT level, total FROM shield_reports WHERE site_id = ? ORDER BY at DESC LIMIT 1', [r.id]);
+      const peak = await db.get('SELECT MAX(total) as p FROM shield_reports WHERE site_id = ?', [r.id]);
+      const users = await db.all('SELECT username FROM shield_users WHERE site_id = ?', [r.id]);
+      out.push({ ...r, level: last ? last.level : null, last_total: last ? last.total : null, peak24h: peak ? peak.p : 0, users: users.map((u) => u.username) });
+    }
+    const local = shieldLocal();
+    res.json({ local: local ? { active: true, level: local.stats().currentMinute.level, last_total: local.stats().currentMinute.total } : { active: false }, sites: out });
+  })
+);
+
+app.get(
+  '/monitor/overview',
+  asyncHandler(async (req, res) => {
+    const siteId = await resolveSite(req, res);
+    if (!siteId) return;
+    if (siteId === LOCAL_SITE) {
+      const sh = shieldLocal();
+      if (!sh) return res.json({ site: { id: LOCAL_SITE, name: 'Este servidor (Protection BLUEX)' }, active: false });
+      const st = sh.stats();
+      return res.json({
+        site: { id: LOCAL_SITE, name: 'Este servidor (Protection BLUEX)' }, active: true, live: true,
+        thresholds: st.thresholds, defense: st.defense, underAttack: st.underAttack, loadShed: st.loadShed,
+        current: st.currentMinute, history: st.history.map((h) => ({ at: h.t, total: h.total, blocked: h.blocked, level: h.level })),
+        top: st.top.filter((x) => x.n >= 50), banned: st.banned, events: st.suspicious.slice(0, 40), lastReportAt: new Date().toISOString(),
+      });
+    }
+    const site = await db.get('SELECT id, name, last_report_at FROM shield_sites WHERE id = ?', [siteId]);
+    if (!site) return res.status(404).json({ error: 'Site não encontrado.' });
+    const reps = await db.all('SELECT * FROM shield_reports WHERE site_id = ? ORDER BY at DESC LIMIT 180', [siteId]);
+    const last = reps[0];
+    const ageS = last ? Math.round((Date.now() - new Date(last.at).getTime()) / 1000) : null;
+    res.json({
+      site, active: !!last && ageS < 300, live: false, ageSeconds: ageS,
+      thresholds: { elevated: 1000, suspect: 5000, extreme: 10000 },
+      defense: last ? last.defense : 0,
+      current: last ? { total: last.total, blocked: last.blocked, newBans: last.new_bans, level: last.level } : { total: 0, blocked: 0, newBans: 0, level: 'normal' },
+      history: reps.slice().reverse().map((r) => ({ at: r.at, total: r.total, blocked: r.blocked, level: r.level })),
+      top: last ? JSON.parse(last.top_json || '[]') : [],
+      banned: last ? JSON.parse(last.banned_json || '[]') : [],
+      events: reps.slice(0, 5).flatMap((r) => JSON.parse(r.events_json || '[]')).slice(0, 60).reverse(),
+      lastReportAt: last ? last.at : null,
+    });
+  })
+);
+
+// Derrubar / liberar IP (manual). Vale pro dono e pro usuário do site.
+app.post(
+  '/monitor/command',
+  asyncHandler(async (req, res) => {
+    const siteId = await resolveSite(req, res);
+    if (!siteId) return;
+    const { type, ip, minutes } = req.body || {};
+    if (!['ban', 'unban'].includes(type) || !okIp(ip)) return res.status(400).json({ error: 'Informe type (ban/unban) e um IP válido.' });
+    const mins = Math.min(Math.max(parseInt(minutes, 10) || 60, 1), 1440);
+    if (siteId === LOCAL_SITE) {
+      const sh = shieldLocal();
+      if (!sh) return res.status(400).json({ error: 'Shield não está ativo neste servidor.' });
+      if (type === 'ban') sh.ban(ip, mins); else sh.unban(ip);
+      return res.json({ ok: true, applied: true });
+    }
+    await db.run('INSERT INTO shield_commands (id, site_id, type, ip, minutes, created_by) VALUES (?, ?, ?, ?, ?, ?)', [uuidv4(), siteId, type, ip, mins, req.session.isAdmin ? 'admin' : req.session.siteUser || 'site']);
+    res.json({ ok: true, applied: false, note: 'Comando enfileirado — o Shield do site aplica no próximo envio (até ~1 min).' });
+  })
+);
+
+// Admin: cadastrar site, gerar chave e criar usuário pro seu amigo.
+app.post(
+  '/admin/shield-sites',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const name = String((req.body && req.body.name) || '').trim().slice(0, 80);
+    if (!name) return res.status(400).json({ error: 'Dê um nome ao site.' });
+    const id = uuidv4();
+    const key = 'bxs_' + crypto.randomBytes(24).toString('hex');
+    await db.run('INSERT INTO shield_sites (id, name, site_key) VALUES (?, ?, ?)', [id, name, key]);
+    res.json({ id, name, key });
+  })
+);
+app.get('/admin/shield-sites/:id/key', requireAdmin, asyncHandler(async (req, res) => {
+  const s = await db.get('SELECT site_key FROM shield_sites WHERE id = ?', [req.params.id]);
+  if (!s) return res.status(404).json({ error: 'Site não encontrado.' });
+  res.json({ key: s.site_key });
+}));
+app.post(
+  '/admin/shield-sites/:id/user',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const username = String((req.body && req.body.username) || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40);
+    const password = String((req.body && req.body.password) || '');
+    if (username.length < 3 || password.length < 8) return res.status(400).json({ error: 'Usuário (3+ letras) e senha (8+ caracteres).' });
+    if (!(await db.get('SELECT id FROM shield_sites WHERE id = ?', [req.params.id]))) return res.status(404).json({ error: 'Site não encontrado.' });
+    if (await db.get('SELECT id FROM shield_users WHERE username = ?', [username])) return res.status(409).json({ error: 'Esse usuário já existe.' });
+    await db.run('INSERT INTO shield_users (id, site_id, username, password_hash) VALUES (?, ?, ?, ?)', [uuidv4(), req.params.id, username, hashPassword(password)]);
+    res.json({ ok: true, username });
+  })
+);
+app.delete('/admin/shield-sites/:id', requireAdmin, asyncHandler(async (req, res) => {
+  for (const t of ['shield_reports', 'shield_commands', 'shield_users']) await db.run(`DELETE FROM ${t} WHERE site_id = ?`, [req.params.id]);
+  await db.run('DELETE FROM shield_sites WHERE id = ?', [req.params.id]);
+  res.json({ ok: true });
+}));
+
 app.get('/health', (req, res) => {
   res.json({
     ok: true,

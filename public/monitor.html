@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BLUEX SHIELD — Monitor</title>
+<style>
+:root{--bg:#090b10;--panel:#12151d;--panel2:#171b26;--line:#232838;--tx:#e8ecf4;--mut:#8f98ab;--blue:#3b82f6;--cy:#22d3ee;--ok:#22c55e;--warn:#facc15;--org:#fb923c;--red:#ef4444}
+*{box-sizing:border-box}body{margin:0;font-family:Inter,-apple-system,Segoe UI,Roboto,sans-serif;background:radial-gradient(1200px 500px at 70% -10%,#13204a55,transparent),var(--bg);color:var(--tx)}
+.hidden{display:none!important}
+header{display:flex;align-items:center;gap:14px;padding:14px 22px;border-bottom:1px solid var(--line);background:#0c0f16cc;backdrop-filter:blur(8px);position:sticky;top:0;z-index:5}
+.logo{font-weight:800;letter-spacing:.3px;font-size:17px}.logo small{display:block;font-size:10px;color:var(--cy);letter-spacing:1.6px;font-weight:700}
+.sp{flex:1}select,input,button{font:inherit}select,input{background:var(--panel2);border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:8px 10px}
+button{cursor:pointer;border:0;border-radius:8px;padding:8px 14px;font-weight:700;color:#fff;background:linear-gradient(135deg,#1d4ed8,#2563eb 55%,#0891b2)}
+button.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--tx)}button.danger{background:linear-gradient(135deg,#b91c1c,#ef4444)}button.sm{padding:5px 10px;font-size:12px}
+main{max-width:1180px;margin:0 auto;padding:22px}
+.banner{border-radius:12px;padding:14px 18px;margin-bottom:18px;font-weight:700;display:flex;gap:12px;align-items:center;border:1px solid}
+.banner small{font-weight:500;opacity:.9;display:block}
+.b-normal{background:#052e1a;border-color:#14532d;color:#86efac}.b-elevado{background:#3a2f05;border-color:#854d0e;color:#fde68a}.b-suspeito{background:#3b1d08;border-color:#9a3412;color:#fdba74}.b-extremo{background:#3b0a0a;border-color:#991b1b;color:#fca5a5;animation:pulse 1.4s infinite}.b-off{background:#1b1f2b;border-color:var(--line);color:var(--mut)}
+@keyframes pulse{50%{box-shadow:0 0 0 6px #ef444433}}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}.kpi .l{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.8px}.kpi .v{font-size:30px;font-weight:800;margin-top:4px}.kpi .s{color:var(--mut);font-size:12px;margin-top:2px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:18px}.card h2{margin:0 0 12px;font-size:15px;display:flex;align-items:center;gap:8px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}@media(max-width:860px){.grid2{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase}
+.mono{font-family:ui-monospace,Menlo,monospace}.mut{color:var(--mut)}.pill{padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700}
+.p-normal{background:#14532d;color:#86efac}.p-elevado{background:#713f12;color:#fde68a}.p-suspeito{background:#7c2d12;color:#fdba74}.p-extremo{background:#7f1d1d;color:#fca5a5}.p-r{background:#1e293b;color:#cbd5e1}
+canvas{width:100%;height:240px;display:block}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.login{max-width:360px;margin:12vh auto;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:28px}.login input{width:100%;margin:6px 0}
+.note{font-size:12px;color:var(--mut);border-left:3px solid var(--blue);padding:6px 10px;background:#0f1524;border-radius:0 8px 8px 0}
+code{background:#0b0e16;border:1px solid var(--line);padding:2px 6px;border-radius:6px;font-size:12px;word-break:break-all}
+pre{background:#0b0e16;border:1px solid var(--line);padding:12px;border-radius:10px;overflow:auto;font-size:12px}
+</style>
+</head>
+<body>
+<div id="login" class="login hidden">
+  <div class="logo">🛡️ BLUEX SHIELD<small>MONITOR DE REQUISIÇÕES</small></div>
+  <p class="mut" style="font-size:13px">Entre com o usuário do seu site (ou com a conta de admin pelo painel principal).</p>
+  <input id="lu" placeholder="Usuário" autocomplete="username" /><input id="lp" type="password" placeholder="Senha" autocomplete="current-password" />
+  <button id="lb" style="width:100%;margin-top:8px">Entrar</button><div id="le" style="color:var(--red);font-size:13px;margin-top:8px"></div>
+  <p class="mut" style="font-size:12px;margin-top:14px">Admin? <a href="/" style="color:var(--cy)">entre no painel</a> e volte aqui.</p>
+</div>
+
+<div id="app" class="hidden">
+<header>
+  <div class="logo">🛡️ BLUEX SHIELD<small>MONITOR DE REQUISIÇÕES</small></div><div class="sp"></div>
+  <select id="site" class="hidden"></select><span id="who" class="mut" style="font-size:13px"></span>
+  <button class="ghost sm" id="logout">Sair</button>
+</header>
+<main>
+  <div id="banner" class="banner b-off">Carregando…</div>
+  <div class="kpis">
+    <div class="kpi"><div class="l">Requisições / minuto</div><div class="v" id="k-total">—</div><div class="s" id="k-total-s"></div></div>
+    <div class="kpi"><div class="l">Bloqueadas</div><div class="v" id="k-blk">—</div><div class="s">neste minuto</div></div>
+    <div class="kpi"><div class="l">Defesa</div><div class="v" id="k-def">—</div><div class="s" id="k-def-s"></div></div>
+    <div class="kpi"><div class="l">IPs derrubados</div><div class="v" id="k-ban">—</div><div class="s">agora</div></div>
+    <div class="kpi"><div class="l">Pico (período)</div><div class="v" id="k-peak">—</div><div class="s" id="k-last"></div></div>
+  </div>
+  <div class="card"><h2>📈 Requisições por minuto <span class="mut" style="font-weight:400;font-size:12px">— linhas: 1 mil (elevado) · 5 mil (provável DDoS) · 10 mil (extremo)</span></h2><canvas id="chart"></canvas></div>
+  <div class="grid2">
+    <div class="card"><h2>🎯 IPs com requisições demais</h2><div id="top"></div></div>
+    <div class="card"><h2>🚫 IPs derrubados</h2><div id="banned"></div>
+      <div class="row" style="margin-top:12px"><input id="bip" placeholder="IP para derrubar (ex.: 203.0.113.9)" style="flex:1;min-width:160px"/><select id="bmin"><option value="30">30 min</option><option value="60" selected>1 hora</option><option value="360">6 horas</option><option value="1440">24 horas</option></select><button class="danger sm" id="bgo">Derrubar</button></div>
+      <div id="bmsg" class="mut" style="font-size:12px;margin-top:6px"></div></div>
+  </div>
+  <div class="card"><h2>🧾 Eventos suspeitos recentes</h2><div id="events"></div></div>
+  <div class="note">🔒 Privacidade: o Shield só envia <b>números agregados</b> e <b>IPs claramente abusivos</b> (milhares de pedidos por minuto). Nenhum dado de jogador, rota, aparelho, cookie ou conteúdo é coletado. O sistema derruba IPs sozinho; aqui você pode derrubar/liberar manualmente.</div>
+
+  <div id="admin-box" class="card hidden" style="margin-top:18px">
+    <h2>🔑 Sites protegidos (admin)</h2>
+    <div class="row"><input id="ns" placeholder="Nome do site (ex.: Jogo do João)" style="flex:1;min-width:200px"/><button id="nsb">+ Cadastrar site</button></div>
+    <div id="newsite"></div>
+    <table style="margin-top:12px"><thead><tr><th>Site</th><th>Nível</th><th>Último envio</th><th>Pico</th><th>Usuários</th><th></th></tr></thead><tbody id="sites"></tbody></table>
+  </div>
+</main>
+</div>
+<script src="/monitor.js"></script>
+</body>
+</html>

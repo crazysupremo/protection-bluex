@@ -33,7 +33,7 @@ const shield = createShield({
     maxConnectionsPerIp: 100,
     skipPaths: ['/healthz'],
     // API só aceita POST com chave: login do admin é a única rota sensível
-    sensitivePaths: ['/admin/login', '/admin/password'],
+    sensitivePaths: ['/admin/login', '/admin/password', '/shield/login'],
     sensitiveMaxPerMinute: 20,
   });
   const seen = new WeakSet();

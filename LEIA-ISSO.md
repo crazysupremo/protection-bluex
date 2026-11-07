@@ -114,3 +114,17 @@ checagem dupla), **teste automático do Shield** (simula flood/scanner/ban sem a
 lista de IPs banidos com botão "Liberar", e **testes de moderação de texto e imagem** direto no painel.
 Rotas novas (todas exigem login de admin): `GET /admin/system-check`, `POST /admin/shield/self-test`,
 `POST /admin/shield/unban`, `POST /admin/test-text`, `POST /admin/test-image`.
+
+## Monitor BLUEX SHIELD (`/monitor.html`)
+
+Página profissional para analisar requisições: gráfico por minuto (linhas de 1 mil / 5 mil / 10 mil),
+banner de nível (normal / elevado / suspeito ≥5 mil / extremo ≥10 mil), IPs abusivos com botão **Derrubar**,
+IPs derrubados com **Liberar**, eventos suspeitos e **Sites protegidos** (cadastrar site → gera chave +
+cria usuário para o seu amigo entrar e ver só o site dele).
+
+- O Shield do site do amigo manda 1 resumo por minuto para `POST /shield/report` (com a chave `bxs_...`).
+  **Só números e IPs claramente abusivos (200+ pedidos/min). Nenhum dado de jogador.**
+- Derrubar/Liberar pelo painel vira comando que o Shield do site aplica no próximo envio (~1 min).
+- Defesa automática: ≥5 mil/min limites 4× mais apertados; ≥10 mil/min 8× mais apertados.
+- Tabelas novas: `shield_sites`, `shield_users`, `shield_reports` (24 h), `shield_commands`.
+- Passo a passo para o amigo: `bluex-shield/MANUAL.md`.

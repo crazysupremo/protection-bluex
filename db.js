@@ -98,6 +98,28 @@ async function initDb() {
     )
   `);
 
+  // ---------- MONITOR DO BLUEX SHIELD (sites protegidos) ----------
+  // Cada site (ex.: o jogo do seu amigo) tem uma CHAVE; o Shield dele manda 1 resumo por
+  // minuto. PRIVACIDADE: só números agregados + IPs claramente abusivos. Nada de jogador.
+  await run(`CREATE TABLE IF NOT EXISTS shield_sites (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, site_key TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), last_report_at TEXT
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS shield_users (
+    id TEXT PRIMARY KEY, site_id TEXT NOT NULL, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS shield_reports (
+    id TEXT PRIMARY KEY, site_id TEXT NOT NULL, at TEXT NOT NULL, total INTEGER NOT NULL DEFAULT 0,
+    blocked INTEGER NOT NULL DEFAULT 0, new_bans INTEGER NOT NULL DEFAULT 0, level TEXT, defense INTEGER NOT NULL DEFAULT 0,
+    top_json TEXT, banned_json TEXT, events_json TEXT
+  )`);
+  await run('CREATE INDEX IF NOT EXISTS idx_shield_reports_site_at ON shield_reports (site_id, at)');
+  await run(`CREATE TABLE IF NOT EXISTS shield_commands (
+    id TEXT PRIMARY KEY, site_id TEXT NOT NULL, type TEXT NOT NULL, ip TEXT NOT NULL, minutes INTEGER,
+    created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), delivered_at TEXT
+  )`);
+
   console.log('[PROTECTION BLUEX] banco de dados pronto.');
 }
 

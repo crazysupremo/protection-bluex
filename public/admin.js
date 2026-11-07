@@ -302,6 +302,14 @@ checkSession();
   }
 
   $('vf-refresh').onclick = loadVerify;
+  $('inv-gen').onclick = async () => {
+    const box = $('inv-out');
+    box.textContent = 'Gerando...';
+    try {
+      const d = await api('/admin/shield-invites', { method: 'POST', body: JSON.stringify({ note: $('inv-note').value }) });
+      box.innerHTML = '<div style="font-weight:700;">Mande este link para ele:</div><code>' + escapeHtml(d.link) + '</code>';
+    } catch (e) { box.textContent = 'Erro: ' + e.message; }
+  };
   $('vf-shield-test').onclick = async () => {
     const box = $('vf-shield-results');
     box.textContent = 'Rodando...';

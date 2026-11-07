@@ -923,6 +923,45 @@ app.post('/shield/logout', (req, res) => {
   if (req.session) { delete req.session.siteId; delete req.session.siteUser; }
   res.json({ ok: true });
 });
+// ---- Convites + auto-cadastro (o amigo cria o próprio site/usuário com um código do dono) ----
+const shieldSignupLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 12, standardHeaders: true, legacyHeaders: false });
+function publicBase(req) { return (process.env.PUBLIC_URL || (req.protocol + '://' + req.get('host'))).replace(/\/+$/, ''); }
+app.post('/admin/shield-invites', requireAdmin, asyncHandler(async (req, res) => {
+  const note = String((req.body && req.body.note) || '').trim().slice(0, 80);
+  const code = 'bxc_' + crypto.randomBytes(9).toString('hex');
+  const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+  await db.run('INSERT INTO shield_invites (code, note, expires_at) VALUES (?, ?, ?)', [code, note, expires]);
+  res.json({ code, link: publicBase(req) + '/cadastro.html?c=' + code, expires });
+}));
+app.get('/admin/shield-invites', requireAdmin, asyncHandler(async (req, res) => {
+  res.json({ invites: await db.all('SELECT code, note, created_at, expires_at, used_at FROM shield_invites ORDER BY created_at DESC LIMIT 30') });
+}));
+app.post('/shield/signup', shieldSignupLimiter, asyncHandler(async (req, res) => {
+  const b = req.body || {};
+  const code = String(b.code || '').trim();
+  const siteName = String(b.siteName || '').trim().slice(0, 80);
+  const username = String(b.username || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40);
+  const password = String(b.password || '');
+  if (!siteName) return res.status(400).json({ error: 'Informe o nome do seu jogo/site.' });
+  if (username.length < 3 || password.length < 8) return res.status(400).json({ error: 'Usuário (3+ letras) e senha (8+ caracteres).' });
+  const inv = code ? await db.get('SELECT * FROM shield_invites WHERE code = ?', [code]) : null;
+  if (!inv || inv.used_at || new Date(inv.expires_at).getTime() < Date.now()) return res.status(400).json({ error: 'Convite inválido, já usado ou vencido. Peça um novo.' });
+  if (await db.get('SELECT id FROM shield_users WHERE username = ?', [username])) return res.status(409).json({ error: 'Esse usuário já existe. Escolha outro.' });
+  const id = uuidv4(), key = 'bxs_' + crypto.randomBytes(24).toString('hex');
+  await db.run('INSERT INTO shield_sites (id, name, site_key) VALUES (?, ?, ?)', [id, siteName, key]);
+  await db.run('INSERT INTO shield_users (id, site_id, username, password_hash) VALUES (?, ?, ?, ?)', [uuidv4(), id, username, hashPassword(password)]);
+  await db.run("UPDATE shield_invites SET used_at = datetime('now'), site_id = ? WHERE code = ?", [id, code]);
+  req.session.siteId = id; req.session.siteUser = username;
+  res.json({ ok: true, siteName, key, url: publicBase(req), username });
+}));
+// O usuário do site revê a própria chave/endereço (precisa estar logado).
+app.get('/shield/my-config', asyncHandler(async (req, res) => {
+  if (!(req.session && req.session.siteId)) return res.status(401).json({ error: 'Não autenticado.' });
+  const s = await db.get('SELECT name, site_key FROM shield_sites WHERE id = ?', [req.session.siteId]);
+  if (!s) return res.status(404).json({ error: 'Site não encontrado.' });
+  res.json({ siteName: s.name, key: s.site_key, url: publicBase(req) });
+}));
+
 app.get('/shield/whoami', asyncHandler(async (req, res) => {
   if (req.session && req.session.isAdmin) return res.json({ role: 'admin' });
   if (req.session && req.session.siteId) {

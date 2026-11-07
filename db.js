@@ -125,6 +125,12 @@ async function initDb() {
     at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
+  // Convites de cadastro (v0.3): o dono gera um código; o amigo usa em /cadastro.html e cria o próprio site+usuário.
+  await run(`CREATE TABLE IF NOT EXISTS shield_invites (
+    code TEXT PRIMARY KEY, note TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL, used_at TEXT, site_id TEXT
+  )`);
+
   console.log('[PROTECTION BLUEX] banco de dados pronto.');
 }
 

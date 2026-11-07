@@ -131,5 +131,4 @@ cria usuário para o seu amigo entrar e ver só o site dele).
 
 ### Jogo do amigo em C++ (Windows)
 O site do amigo usa o **BLUEX SHIELD em C++** (`bluex_shield.hpp`, zip `bluex-shield-cpp-amigo.zip`). Ele manda o resumo por minuto
-para `POST /shield/report` (mesmo formato do Shield em Node). No monitor, clique **⬇ bluex_shield.json** na linha do site
-e envie esse arquivo a ele; ele coloca ao lado do `.exe` do jogo.
+para `POST /shield/report`. No monitor, clique **⬇ bluex_shield.json** na linha do site e envie esse arquivo a ele.

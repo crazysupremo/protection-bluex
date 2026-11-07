@@ -15,3 +15,8 @@
    no Render do NEXT GAME crie `PROTECTION_BLUEX_URL=https://SEU-PROTECTION-BLUEX` e a mesma `BLUEX_OWNER_KEY`.
 
 A PASTA 2 (`bluex-shield-cpp-amigo.zip`) é o que você envia ao seu amigo.
+
+## Novo: cadastro do amigo por convite
+1. Entre no painel de admin > aba "🛡️ Verificação" > "Convite para cadastro" > **Gerar link de cadastro**.
+2. Mande o link para o seu amigo. Ele abre `/cadastro.html`, cria usuário e senha e recebe a **chave** e o **endereço** para colar no `INSTALAR.bat`.
+3. Ele passa a ver só o site dele em `/monitor.html`. Cada link vale para 1 cadastro e vence em 7 dias.

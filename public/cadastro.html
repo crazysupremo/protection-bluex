@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BLUEX SHIELD — Cadastro</title>
+<style>
+:root{--bg:#090b10;--panel:#12151d;--panel2:#171b26;--line:#232838;--tx:#e8ecf4;--mut:#8f98ab;--blue:#3b82f6;--cy:#22d3ee;--ok:#22c55e;--red:#ef4444}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,-apple-system,Segoe UI,Roboto,sans-serif;background:radial-gradient(1200px 500px at 70% -10%,#13204a66,transparent),var(--bg);color:var(--tx);display:flex;align-items:center;justify-content:center;padding:20px}
+.card{width:100%;max-width:460px;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:28px}
+.logo{font-weight:800;font-size:19px}.logo small{display:block;font-size:10px;color:var(--cy);letter-spacing:1.6px}
+p{color:var(--mut);font-size:13px;line-height:1.5}label{display:block;font-size:12px;color:var(--mut);margin:12px 0 4px}
+input{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:10px;font:inherit}
+button{margin-top:16px;width:100%;cursor:pointer;border:0;border-radius:10px;padding:12px;font-weight:700;color:#fff;font-size:15px;background:linear-gradient(135deg,#1d4ed8,#2563eb 55%,#0891b2)}
+.err{color:#fca5a5;font-size:13px;margin-top:10px;min-height:16px}
+code{display:block;background:#0b0e16;border:1px solid var(--line);padding:8px 10px;border-radius:8px;font-size:12px;word-break:break-all;margin:4px 0 10px;user-select:all}
+.ok{color:#86efac;font-weight:700}.hidden{display:none}ol{color:var(--mut);font-size:13px;line-height:1.7;padding-left:18px}
+.note{font-size:12px;color:var(--mut);border-left:3px solid var(--blue);padding:6px 10px;background:#0f1524;border-radius:0 8px 8px 0;margin-top:14px}
+a{color:var(--cy)}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">🛡️ BLUEX SHIELD<small>CADASTRO DO SEU JOGO</small></div>
+  <div id="f">
+    <p>Crie seu acesso para acompanhar as requisições do seu servidor e derrubar IPs abusivos. Seu servidor roda no seu PC — ele só envia números e IPs de quem exagera. <b>Nada de dados de jogadores.</b></p>
+    <label>Código do convite</label><input id="c" placeholder="bxc_..." autocomplete="off" />
+    <label>Nome do seu jogo / site</label><input id="n" placeholder="Ex.: Meu Jogo" />
+    <label>Usuário (para entrar no painel)</label><input id="u" placeholder="ex.: meujogo" autocomplete="username" />
+    <label>Senha (mínimo 8 caracteres)</label><input id="p" type="password" autocomplete="new-password" />
+    <div class="err" id="e"></div>
+    <button id="go">Criar meu acesso</button>
+  </div>
+  <div id="done" class="hidden">
+    <p class="ok">✔ Cadastro criado! Guarde estes dados — você vai usá-los no INSTALAR.bat:</p>
+    <label>Chave</label><code id="k"></code>
+    <label>Endereço do painel</label><code id="a"></code>
+    <ol>
+      <li>Abra o <b>INSTALAR.bat</b> da pasta que você recebeu.</li>
+      <li>Quando ele pedir, cole a <b>chave</b> e o <b>endereço</b> acima.</li>
+      <li>Depois é só ver tudo no <a href="/monitor.html">Monitor</a> (entre com o usuário e a senha que você acabou de criar).</li>
+    </ol>
+    <div class="note">Você já está logado. Para rever a chave depois, entre no Monitor.</div>
+    <button onclick="location.href='/monitor.html'">Abrir meu Monitor</button>
+  </div>
+</div>
+<script>
+const $ = (i) => document.getElementById(i);
+$('c').value = new URLSearchParams(location.search).get('c') || '';
+$('go').onclick = async () => {
+  $('e').textContent = ''; $('go').disabled = true;
+  try {
+    const r = await fetch('/shield/signup', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: $('c').value, siteName: $('n').value, username: $('u').value, password: $('p').value }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'Não foi possível cadastrar.');
+    $('k').textContent = d.key; $('a').textContent = d.url; $('f').classList.add('hidden'); $('done').classList.remove('hidden');
+  } catch (e) { $('e').textContent = e.message; } finally { $('go').disabled = false; }
+};
+</script>
+</body>
+</html>

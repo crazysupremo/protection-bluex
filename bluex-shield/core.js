@@ -3,6 +3,12 @@
 // (require('./bluex-shield') no topo do jogo). Os valores abaixo são os
 // padrões; só altera se souberes o que estás a fazer.
 
+// Máquina própria (sem painel tipo Render)? Basta um arquivo bluex-shield/config.json:
+// { "key": "bxs_...", "url": "https://seu-protection-bluex", "site": "Nome do jogo" }
+// Variáveis de ambiente, se existirem, têm prioridade.
+let FILE_CFG = {};
+for (const f of ['config.json', 'bluex_shield.json']) { try { FILE_CFG = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, f), 'utf8')) || {}; break; } catch (_) {} }
+
 const DEFAULTS = {
   windowMs: 10_000, // janela de contagem
   maxPerWindow: 120, // pedidos por IP por janela (120/10s = 12 por segundo)
@@ -37,9 +43,9 @@ const DEFAULTS = {
   suspectPerMinute: 5_000, // provável DDoS: liga a DEFESA AUTOMÁTICA (limites 4x mais apertados)
   alertPerMinute: 10_000, // EXTREMO: defesa máxima (limites 8x mais apertados) + alerta
   elevatedPerMinute: 1_000, // "pedidos demais": sinaliza no painel (amarelo)
-  siteName: process.env.BLUEX_SHIELD_SITE || '', // nome do site no painel (ex.: "Jogo do João")
-  reportKey: process.env.BLUEX_SHIELD_KEY || '', // chave do site no Protection BLUEX (pedir ao dono)
-  reportUrl: process.env.BLUEX_SHIELD_URL || 'https://protection-bluex.onrender.com',
+  siteName: process.env.BLUEX_SHIELD_SITE || FILE_CFG.site || '', // nome do site no painel (ex.: "Jogo do João")
+  reportKey: process.env.BLUEX_SHIELD_KEY || FILE_CFG.key || '', // chave do site no Protection BLUEX (pedir ao dono)
+  reportUrl: process.env.BLUEX_SHIELD_URL || FILE_CFG.url || 'https://protection-bluex.onrender.com',
   minAbusiveToReport: 200, // só manda IP pro painel se ele fez >= isto no minuto (IP normal NUNCA é enviado)
   suspiciousKeep: 300, // quantos pedidos suspeitos guardar na memória
   log: true,
@@ -91,6 +97,7 @@ function createShield(options = {}) {
   let underAttack = false;
   let normalPerSecond = 0;
   const minute = { total: 0, blocked: 0, newBans: 0, perIp: new Map() };
+  if (cfg.reportKey && cfg.log) console.log('[BLUEX SHIELD] 🔗 vinculado ao Protection BLUEX' + (cfg.siteName ? ' como "' + cfg.siteName + '"' : '') + '.');
   const recent = []; // últimos bans (pro painel admin)
   const suspicious = []; // pedidos suspeitos/bloqueados (coleta completa: ip, rota, user-agent...)
   const history = []; // 1 ponto por minuto (últimas 2h)
@@ -132,6 +139,8 @@ function createShield(options = {}) {
       // Proxy interno (Render, Heroku, nginx na mesma máquina): a conexão
       // vem de IP privado. Um atacante na internet nunca tem IP privado,
       // então não dá pra falsificar isto de fora.
+      // Túnel local (Cloudflare Tunnel / ngrok rodando na MESMA máquina): a conexão vem de 127.0.0.1.
+      if (isPrivateIp(remote) && !headers['x-forwarded-for'] && headers['cf-connecting-ip']) return normalizeIp(headers['cf-connecting-ip']);
       if (isPrivateIp(remote) && headers['x-forwarded-for']) {
         const xff = String(headers['x-forwarded-for']).split(',').map((s) => s.trim()).filter(Boolean);
         // Pula proxies internos no fim da lista (ex: Render tem mais de um).
@@ -567,6 +576,7 @@ function createShield(options = {}) {
     minute.perIp.clear();
   }, cfg.logIntervalMs);
   timer.unref();
+  if (cfg.reportKey) { const first = setTimeout(() => sendReport(false), 3000); first.unref(); }
 
   return {
     middleware,

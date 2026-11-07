@@ -40,9 +40,10 @@
     sel.value = [...sel.options].some((o) => o.value === keep) ? keep : 'local'; siteId = sel.value;
     const age = (t) => { if (!t) return 'nunca'; const m = Math.round((Date.now() - new Date(t + (t.includes('Z') ? '' : 'Z')).getTime()) / 60000); return m < 1 ? 'agora' : m + ' min atrás'; };
     $('sites').innerHTML = d.sites.length ? d.sites.map((s) => `<tr>
-      <td><b>${esc(s.name)}</b></td><td>${s.level ? `<span class="pill p-${s.level}">${s.level}</span>` : '<span class="mut">—</span>'}</td>
+      <td><b>${esc(s.name)}</b> <span class="pill ${s.online ? 'p-normal' : 'p-r'}">${s.online ? '🟢 conectado' : '⚪ offline'}</span></td><td>${s.level ? `<span class="pill p-${s.level}">${s.level}</span>` : '<span class="mut">—</span>'}</td>
       <td class="mut">${age(s.last_report_at)}</td><td>${fmt(s.peak24h)}</td><td class="mut">${esc((s.users || []).join(', ') || '—')}</td>
-      <td class="row"><button class="ghost sm" data-key="${esc(s.id)}">Chave</button><button class="ghost sm" data-user="${esc(s.id)}">+ Usuário</button><button class="danger sm" data-del="${esc(s.id)}">Excluir</button></td></tr>`).join('') : '<tr><td colspan="6" class="mut">Nenhum site ainda. Cadastre o jogo do seu amigo acima.</td></tr>';
+      <td class="row"><button class="ghost sm" data-cfg="${esc(s.id)}">⬇ bluex_shield.json</button><button class="ghost sm" data-key="${esc(s.id)}">Chave</button><button class="ghost sm" data-user="${esc(s.id)}">+ Usuário</button><button class="danger sm" data-del="${esc(s.id)}">Excluir</button></td></tr>`).join('') : '<tr><td colspan="6" class="mut">Nenhum site ainda. Cadastre o jogo do seu amigo acima.</td></tr>';
+    $('sites').querySelectorAll('[data-cfg]').forEach((b) => b.onclick = async () => downloadCfg(b.dataset.cfg, d.sites.find((x) => x.id === b.dataset.cfg).name));
     $('sites').querySelectorAll('[data-key]').forEach((b) => b.onclick = async () => showSetup((await api('/admin/shield-sites/' + b.dataset.key + '/key')).key, d.sites.find((x) => x.id === b.dataset.key).name));
     $('sites').querySelectorAll('[data-user]').forEach((b) => b.onclick = async () => {
       const username = prompt('Nome de usuário para o site (ex.: joao):'); if (!username) return;
@@ -52,17 +53,25 @@
     $('sites').querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => { if (confirm('Excluir esse site e todo o histórico?')) { await api('/admin/shield-sites/' + b.dataset.del, { method: 'DELETE' }); loadSites(); } });
   }
 
-  function showSetup(key, name) {
-    $('newsite').innerHTML = `<div class="note" style="margin-top:12px"><b>${esc(name)}</b> — no Render do site, crie estas variáveis de ambiente:
-<pre>BLUEX_SHIELD_KEY=${esc(key)}
-BLUEX_SHIELD_URL=${esc(location.origin)}
-BLUEX_SHIELD_SITE=${esc(name)}</pre>
-Depois reinicie. Em ~1 minuto o site aparece aqui com dados.</div>`;
+  async function downloadCfg(id, name) {
+    const cfg = await api('/admin/shield-sites/' + id + '/config');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(cfg, null, 2)], { type: 'application/json' }));
+    a.download = 'bluex_shield.json'; a.click();
+  }
+  function showSetup(key, name, id) {
+    $('newsite').innerHTML = `<div class="note" style="margin-top:12px"><b>${esc(name)}</b> cadastrado. Para vincular:
+<ol style="margin:8px 0 0 18px;padding:0">
+<li>Clique em <b>⬇ bluex_shield.json</b> na linha do site e passe esse arquivo ao seu amigo.</li>
+<li>Ele coloca o <code>bluex_shield.json</code> <b>na pasta do jogo, ao lado do .exe</b> (substituindo o que veio no zip) e reinicia o jogo.</li>
+<li>No console/log dele aparece <code>vinculado ao Protection BLUEX</code> e aqui o site fica <b>🟢 conectado</b> em segundos.</li>
+</ol>
+<div class="mut" style="margin-top:6px">Sem arquivo? Também funciona com variáveis de ambiente: <code>BLUEX_SHIELD_KEY=${esc(key)}</code> <code>BLUEX_SHIELD_URL=${esc(location.origin)}</code></div></div>`;
   }
 
   $('nsb').onclick = async () => {
     const name = $('ns').value.trim(); if (!name) return;
-    try { const r = await api('/admin/shield-sites', { method: 'POST', body: JSON.stringify({ name }) }); $('ns').value = ''; showSetup(r.key, r.name); loadSites(); } catch (e) { alert(e.message); }
+    try { const r = await api('/admin/shield-sites', { method: 'POST', body: JSON.stringify({ name }) }); $('ns').value = ''; showSetup(r.key, r.name, r.id); loadSites(); } catch (e) { alert(e.message); }
   };
   $('site').onchange = () => { siteId = $('site').value; refresh(); };
   $('lb').onclick = async () => {
@@ -78,7 +87,23 @@ Depois reinicie. Em ~1 minuto o site aparece aqui com dados.</div>`;
   }
   $('bgo').onclick = () => { const ip = $('bip').value.trim(); if (ip) cmd('ban', ip, +$('bmin').value).catch((e) => ($('bmsg').textContent = e.message)); };
 
+  let seenAlert = null, firstAlertLoad = true;
+  function beep() { try { const a = new (window.AudioContext || window.webkitAudioContext)(); const o = a.createOscillator(), g = a.createGain(); o.connect(g); g.connect(a.destination); o.frequency.value = 880; g.gain.value = 0.08; o.start(); o.stop(a.currentTime + 0.35); } catch (_) {} }
+  async function loadAlerts() {
+    if (role !== 'admin') return;
+    let d; try { d = await api('/monitor/alerts'); } catch (_) { return; }
+    $('alerts-box').classList.remove('hidden');
+    const K = { online: ['🟢', 'conectou ao Shield'], subiu: ['⚠️', 'começou a receber requisições demais'], extremo: ['🚨', 'ATAQUE EXTREMO'] };
+    const live = d.underAttack || [];
+    const head = live.length ? `<div class="banner b-${live.some((x) => x.level === 'extremo') ? 'extremo' : 'suspeito'}" style="margin-bottom:10px"><div>${live.map((x) => '🛡️ ' + esc(x.name) + ' — ' + esc(x.level) + ' (' + fmt(x.total) + '/min)').join('<br>')}</div></div>` : '';
+    $('alerts').innerHTML = head + (d.alerts.length ? `<table><tbody>${d.alerts.slice(0, 12).map((a) => `<tr><td class="mut">${new Date(a.at).toLocaleString('pt-BR')}</td><td><b>${esc(a.site_name || '?')}</b></td><td>${(K[a.kind] || ['•', a.kind]).join(' ')}${a.kind !== 'online' ? ' — ' + fmt(a.total) + '/min (' + esc(a.level) + ')' : ''}</td></tr>`).join('')}</tbody></table>` : '<span class="mut">Nenhum alerta ainda. Quando um site vinculado começar a receber requisições demais, aparece aqui com o nome dele.</span>');
+    const newest = d.alerts[0] && d.alerts[0].id;
+    if (!firstAlertLoad && newest && newest !== seenAlert && d.alerts[0].kind !== 'online') { beep(); document.title = '🚨 ' + d.alerts[0].site_name + ' — BLUEX SHIELD'; }
+    seenAlert = newest; firstAlertLoad = false;
+  }
+
   async function refresh() {
+    loadAlerts();
     let o;
     try { o = await api('/monitor/overview?site=' + encodeURIComponent(siteId)); } catch (e) { $('banner').className = 'banner b-off'; $('banner').textContent = e.message; return; }
     lastOv = o;

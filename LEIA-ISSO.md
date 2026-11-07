@@ -128,3 +128,8 @@ cria usuário para o seu amigo entrar e ver só o site dele).
 - Defesa automática: ≥5 mil/min limites 4× mais apertados; ≥10 mil/min 8× mais apertados.
 - Tabelas novas: `shield_sites`, `shield_users`, `shield_reports` (24 h), `shield_commands`.
 - Passo a passo para o amigo: `bluex-shield/MANUAL.md`.
+
+### Jogo do amigo em C++ (Windows)
+O site do amigo usa o **BLUEX SHIELD em C++** (`bluex_shield.hpp`, zip `bluex-shield-cpp-amigo.zip`). Ele manda o resumo por minuto
+para `POST /shield/report` (mesmo formato do Shield em Node). No monitor, clique **⬇ bluex_shield.json** na linha do site
+e envie esse arquivo a ele; ele coloca ao lado do `.exe` do jogo.

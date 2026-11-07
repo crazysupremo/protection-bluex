@@ -120,6 +120,11 @@ async function initDb() {
     created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), delivered_at TEXT
   )`);
 
+  await run(`CREATE TABLE IF NOT EXISTS shield_alerts (
+    id TEXT PRIMARY KEY, site_id TEXT NOT NULL, site_name TEXT, kind TEXT NOT NULL, level TEXT, total INTEGER,
+    at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
   console.log('[PROTECTION BLUEX] banco de dados pronto.');
 }
 

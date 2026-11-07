@@ -885,6 +885,15 @@ app.post(
     // Só categoria do motivo + IP abusivo. Qualquer outro campo é descartado.
     const events = (Array.isArray(b.suspicious) ? b.suspicious : []).filter((x) => x && okIp(x.ip)).slice(-40).map((x) => ({ t: String(x.t || '').slice(0, 30), ip: x.ip, reason: String(x.reason || '').slice(0, 40), weight: clip(x.weight, 100000) }));
     const level = ['normal', 'elevado', 'suspeito', 'extremo'].includes(b.level) ? b.level : 'normal';
+    // ALERTAS: "qual site começou?" — registra quando o Shield conecta e quando o nível sobe.
+    const RANK = { normal: 0, elevado: 1, suspeito: 2, extremo: 3 };
+    const prev = await db.get('SELECT level, at FROM shield_reports WHERE site_id = ? ORDER BY at DESC LIMIT 1', [site.id]);
+    const prevAge = prev ? Date.now() - new Date(prev.at).getTime() : Infinity;
+    const addAlert = (kind) => db.run('INSERT INTO shield_alerts (id, site_id, site_name, kind, level, total, at) VALUES (?, ?, ?, ?, ?, ?, ?)', [uuidv4(), site.id, site.name, kind, level, clip(b.total, 1e9), new Date().toISOString()]);
+    if (prevAge > 5 * 60_000) await addAlert('online');
+    if ((RANK[level] || 0) > (prev && prevAge <= 10 * 60_000 ? RANK[prev.level] || 0 : 0) && (RANK[level] || 0) >= 1) await addAlert('subiu');
+    if (b.urgent && level === 'extremo' && !(prev && prev.level === 'extremo' && prevAge < 90_000)) await addAlert('extremo');
+    await db.run("DELETE FROM shield_alerts WHERE at < ?", [new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString()]);
     await db.run(
       'INSERT INTO shield_reports (id, site_id, at, total, blocked, new_bans, level, defense, top_json, banned_json, events_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [uuidv4(), site.id, new Date().toISOString(), clip(b.total, 1e9), clip(b.blocked, 1e9), clip(b.newBans, 1e9), level, clip(b.defense, 2), JSON.stringify(top), JSON.stringify(banned), JSON.stringify(events)]
@@ -932,6 +941,28 @@ async function resolveSite(req, res) {
   return null;
 }
 
+// Alertas recentes: "o site X começou a receber requisições". Admin (sessão) ou chave de dono
+// (BLUEX_OWNER_KEY, usada pelo NEXT GAME pra mostrar o selo no seu perfil).
+app.get(
+  '/monitor/alerts',
+  asyncHandler(async (req, res) => {
+    const ownerKey = process.env.BLUEX_OWNER_KEY;
+    const okOwner = ownerKey && typeof req.get('x-owner-key') === 'string' && passwordMatches(req.get('x-owner-key'), ownerKey);
+    if (!(req.session && req.session.isAdmin) && !okOwner) return res.status(401).json({ error: 'Não autenticado.' });
+    const rows = await db.all('SELECT id, site_id, site_name, kind, level, total, at FROM shield_alerts ORDER BY at DESC LIMIT 60');
+    const sites = await db.all('SELECT s.id, s.name, (SELECT level FROM shield_reports r WHERE r.site_id = s.id ORDER BY at DESC LIMIT 1) as level, (SELECT total FROM shield_reports r WHERE r.site_id = s.id ORDER BY at DESC LIMIT 1) as total, (SELECT at FROM shield_reports r WHERE r.site_id = s.id ORDER BY at DESC LIMIT 1) as at FROM shield_sites s');
+    const now = Date.now();
+    const live = sites.filter((x) => x.at && now - new Date(x.at).getTime() < 3 * 60_000 && x.level && x.level !== 'normal').map((x) => ({ id: x.id, name: x.name, level: x.level, total: x.total }));
+    res.json({ alerts: rows, underAttack: live });
+  })
+);
+
+app.get('/admin/shield-sites/:id/config', requireAdmin, asyncHandler(async (req, res) => {
+  const s = await db.get('SELECT name, site_key FROM shield_sites WHERE id = ?', [req.params.id]);
+  if (!s) return res.status(404).json({ error: 'Site não encontrado.' });
+  res.json({ key: s.site_key, url: req.protocol + '://' + req.get('host'), site: s.name });
+}));
+
 app.get(
   '/monitor/sites',
   requireAdmin,
@@ -939,10 +970,10 @@ app.get(
     const rows = await db.all('SELECT id, name, last_report_at, created_at FROM shield_sites ORDER BY created_at');
     const out = [];
     for (const r of rows) {
-      const last = await db.get('SELECT level, total FROM shield_reports WHERE site_id = ? ORDER BY at DESC LIMIT 1', [r.id]);
+      const last = await db.get('SELECT level, total, at FROM shield_reports WHERE site_id = ? ORDER BY at DESC LIMIT 1', [r.id]);
       const peak = await db.get('SELECT MAX(total) as p FROM shield_reports WHERE site_id = ?', [r.id]);
       const users = await db.all('SELECT username FROM shield_users WHERE site_id = ?', [r.id]);
-      out.push({ ...r, level: last ? last.level : null, last_total: last ? last.total : null, peak24h: peak ? peak.p : 0, users: users.map((u) => u.username) });
+      out.push({ ...r, online: !!last && Date.now() - new Date(last.at).getTime() < 3 * 60_000, level: last ? last.level : null, last_total: last ? last.total : null, peak24h: peak ? peak.p : 0, users: users.map((u) => u.username) });
     }
     const local = shieldLocal();
     res.json({ local: local ? { active: true, level: local.stats().currentMinute.level, last_total: local.stats().currentMinute.total } : { active: false }, sites: out });

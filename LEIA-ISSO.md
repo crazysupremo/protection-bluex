@@ -95,3 +95,14 @@ aceitam `?limit=&offset=&client_id=` (limit capado em 200) e devolvem
 `{ rows, total, limit, offset }`. O painel (`admin.js`/`index.html`) ganhou
 um filtro por empresa e botões de "Anterior"/"Próxima" nas abas de Uso e
 Casos sinalizados.
+
+## Terceira rodada: BLUEX SHIELD v2 + moderação que não "finge limpo"
+
+- **Pasta `bluex-shield/`** (2 arquivos) ligada na linha 1 do `server.js`: limita pedidos por IP,
+  bane flood (10 min até 24h), derruba scanners (`/.env`, `/wp-login`...), cobra a mais por varredura
+  de 404, protege o login do admin e entra em modo proteção se o servidor engasgar.
+  Emergência: variável `BLUEX_SHIELD=off` no Render.
+- **`unverified`**: se a Groq falhar (limite/queda/chave ausente), `/v1/age-verify`,
+  `/v1/moderate-image` e `/v1/analyze-text` agora respondem `"unverified": true` (antes diziam
+  "limpo") e o caso vai pra fila de revisão com a categoria `nao_verificado`.
+  A empresa cliente deve tratar `unverified` como "segurar até revisar".

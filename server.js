@@ -1,3 +1,5 @@
+// BLUEX SHIELD — anti-flood/DDoS (BLUEX_SHIELD=off desliga numa emergência)
+require('./bluex-shield');
 // ---------- PROTECTION BLUEX (BLUE SPORTS GAMES) ----------
 // Serviço standalone (não faz parte do NEXT GAME) de verificação de idade,
 // moderação de conteúdo e análise de texto suspeito — pensado pra ser
@@ -508,6 +510,17 @@ async function transcribeAudio(audioDataUrlOrUrl) {
   }
 }
 
+
+// Se a Groq falhou (limite, queda, chave ausente), NÃO finge que a análise deu "limpo":
+// responde unverified=true pro cliente decidir (ex.: segurar a mensagem) e manda o caso
+// pra fila de revisão humana.
+function isUnverified(result) {
+  return !!(result && (result.error || result.skipped));
+}
+async function flagUnverified(clientId, endpoint, result) {
+  if (isUnverified(result)) await logFlagged(clientId, endpoint, ['nao_verificado'], 'Análise automática indisponível — revisar manualmente', 'baixa');
+}
+
 async function logUsage(clientId, endpoint, flagged, durationMs) {
   try {
     await db.run('INSERT INTO usage_logs (id, client_id, endpoint, flagged, duration_ms) VALUES (?, ?, ?, ?, ?)', [
@@ -569,7 +582,9 @@ app.post(
     const flagged = !!result.flagged_as_minor;
     await logUsage(req.client.id, 'age-verify', flagged, Date.now() - start);
     if (flagged) await logFlagged(req.client.id, 'age-verify', ['possivel_menor'], result.reason, result.confidence);
+    await flagUnverified(req.client.id, 'age-verify', result);
     res.json({
+      unverified: isUnverified(result),
       estimated_age: result.estimated_age ?? null,
       confidence: result.confidence || 'baixa',
       flagged_as_minor: flagged,
@@ -614,7 +629,8 @@ app.post(
     const flagged = !!result.flagged;
     await logUsage(req.client.id, 'moderate-image', flagged, Date.now() - start);
     if (flagged) await logFlagged(req.client.id, 'moderate-image', result.categories, result.reason, result.confidence);
-    res.json({ flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null });
+    await flagUnverified(req.client.id, 'moderate-image', result);
+    res.json({ unverified: isUnverified(result), flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null });
   })
 );
 
@@ -651,7 +667,8 @@ app.post(
     const flagged = !!result.flagged;
     await logUsage(req.client.id, 'analyze-text', flagged, Date.now() - start);
     if (flagged) await logFlagged(req.client.id, 'analyze-text', result.categories, result.reason, result.confidence);
-    res.json({ flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null });
+    await flagUnverified(req.client.id, 'analyze-text', result);
+    res.json({ unverified: isUnverified(result), flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null });
   })
 );
 

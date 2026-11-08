@@ -1,0 +1,1146 @@
+// BLUEX SHIELD — anti-flood/DDoS (BLUEX_SHIELD=off desliga numa emergência)
+require('./bluex-shield');
+// ---------- PROTECTION BLUEX (BLUE SPORTS GAMES) ----------
+// Serviço standalone (não faz parte do NEXT GAME) de verificação de idade,
+// moderação de conteúdo e análise de texto suspeito — pensado pra ser
+// vendido/licenciado como API pra outras empresas integrarem nos próprios
+// produtos.
+//
+// A análise de câmera de segurança comercial (furto/roubo) NÃO mora aqui —
+// é o BLUEX SECURITY, um app totalmente separado (outro repositório, outro
+// deploy, outro painel admin), porque é outro público-alvo (comércio/
+// varejo, não plataformas online).
+//
+// IMPORTANTE — limitações reais que qualquer empresa cliente precisa saber
+// (documentadas também no README): isso usa um modelo de visão de propósito
+// geral (Groq) pra dar uma camada de sinalização automática. NÃO é, e não
+// deve ser vendido como, um substituto de: (1) serviços especializados de
+// detecção de CSAM que comparam contra bancos de hashes conhecidos
+// (PhotoDNA/Thorn Safer) — esta API nunca tenta identificar exploração
+// infantil especificamente, só quando pedido explicitamente marca
+// "revisar_urgente" pra qualquer suspeita envolvendo menor em contexto de
+// risco, pra revisão humana; (2) verificação de idade legalmente vinculante
+// — é uma estimativa por IA, não documento oficial.
+const express = require('express');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const cookieSession = require('cookie-session');
+const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
+const path = require('path');
+const dns = require('dns').promises;
+const net = require('net');
+const db = require('./db');
+
+const app = express();
+const PORT = process.env.PORT || 4900;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'bluex-dev-secret-troque-em-producao';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || null;
+app.set('trust proxy', 1);
+
+app.use(helmet({ contentSecurityPolicy: false }));
+// 28MB — dá espaço pra áudio (até 20MB) ou vários frames de vídeo (até 12)
+// em base64 no mesmo request, além de imagem/texto normais.
+app.use(express.json({ limit: '28mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(
+  cookieSession({
+    name: 'bluex_admin_session',
+    keys: [SESSION_SECRET],
+    maxAge: 12 * 60 * 60 * 1000,
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PRODUCTION,
+  })
+);
+
+const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false });
+app.use('/v1/', apiLimiter);
+// Áudio/vídeo são bem mais caros (transcrição, ou vários frames por
+// chamada) — limite mais apertado que o geral, só nesses dois.
+const heavyLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+const adminLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
+
+function asyncHandler(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+// Compara senha em tempo constante — evita que a diferença de tempo de
+// resposta vaze quantos caracteres do início a senha tentada acertou.
+function passwordMatches(attempt, expected) {
+  const attemptBuf = Buffer.from(String(attempt || ''));
+  const expectedBuf = Buffer.from(String(expected || ''));
+  if (attemptBuf.length !== expectedBuf.length) {
+    crypto.timingSafeEqual(expectedBuf, expectedBuf); // mantém o tempo constante mesmo no caminho "tamanho diferente"
+    return false;
+  }
+  return crypto.timingSafeEqual(attemptBuf, expectedBuf);
+}
+
+// ---------- Senha do admin trocável (guardada com hash no banco) ----------
+// Usa scrypt (nativo do Node, sem dependência extra) em vez de guardar a
+// senha em texto puro. Formato salvo: "salt:hash", ambos em hex.
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyHashedPassword(attempt, stored) {
+  const [salt, hash] = String(stored || '').split(':');
+  if (!salt || !hash) return false;
+  const attemptHash = crypto.scryptSync(String(attempt || ''), salt, 64).toString('hex');
+  const hashBuf = Buffer.from(hash, 'hex');
+  const attemptBuf = Buffer.from(attemptHash, 'hex');
+  if (hashBuf.length !== attemptBuf.length) return false;
+  return crypto.timingSafeEqual(hashBuf, attemptBuf);
+}
+
+// ---------- Proteção contra SSRF em audio_url/image_url ----------
+// Como /v1/moderate-audio baixa o áudio de audio_url DIRETO no nosso
+// servidor (diferente de image_url, que é repassada pra Groq buscar), uma
+// empresa cliente mal-intencionada (ou com a chave de API vazada) poderia
+// tentar usar isso pra sondar rede interna (ex: metadata endpoint de nuvem,
+// serviços internos). Resolve o hostname e bloqueia IPs privados/loopback/
+// link-local antes de buscar.
+function isPrivateOrReservedIp(ip) {
+  if (net.isIP(ip) === 4) {
+    const [a, b] = ip.split('.').map(Number);
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return false;
+  }
+  if (net.isIP(ip) === 6) {
+    const lower = ip.toLowerCase();
+    if (lower === '::1' || lower === '::') return true;
+    if (lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd')) return true;
+    if (lower.startsWith('::ffff:')) {
+      const v4 = lower.split(':').pop();
+      if (net.isIP(v4) === 4) return isPrivateOrReservedIp(v4);
+    }
+    return false;
+  }
+  return true; // não reconhecido como IP válido -> trata como inseguro
+}
+
+async function isSafeExternalUrl(urlStr) {
+  let parsed;
+  try {
+    parsed = new URL(urlStr);
+  } catch (_) {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (parsed.hostname === 'localhost') return false;
+  try {
+    const { address } = await dns.lookup(parsed.hostname);
+    return !isPrivateOrReservedIp(address);
+  } catch (_) {
+    return false;
+  }
+}
+
+// ---------- AUTENTICAÇÃO POR CHAVE DE API (empresas clientes) ----------
+async function requireApiKey(req, res, next) {
+  const key = req.header('X-API-Key') || (req.query && req.query.api_key);
+  if (!key) return res.status(401).json({ error: 'Chave de API ausente (header X-API-Key).' });
+  const client = await db.get('SELECT * FROM clients WHERE api_key = ?', [key]);
+  if (!client || !client.is_active) return res.status(401).json({ error: 'Chave de API inválida ou inativa.' });
+  req.client = client;
+  next();
+}
+
+// ---------- AUTENTICAÇÃO DO PAINEL ADMIN (você, não os clientes) ----------
+function requireAdmin(req, res, next) {
+  if (!req.session || !req.session.isAdmin) return res.status(401).json({ error: 'Não autenticado.' });
+  next();
+}
+
+app.post(
+  '/admin/login',
+  adminLoginLimiter,
+  asyncHandler(async (req, res) => {
+    const { password } = req.body || {};
+    if (!password || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Informe a senha.' });
+    }
+    // A senha trocada pelo painel (aba Segurança) fica no banco e tem
+    // prioridade. Enquanto ninguém trocou ainda, cai de volta pra
+    // ADMIN_PASSWORD (variável de ambiente) — é só o bootstrap do primeiro
+    // acesso.
+    let stored = await db.get('SELECT password_hash FROM admin_settings WHERE id = 1');
+    // RECUPERAÇÃO: esqueceu a senha trocada no painel? No Render, crie a variável
+    // ADMIN_RESET=1 (com ADMIN_PASSWORD preenchida), faça o deploy e entre com a
+    // senha do ADMIN_PASSWORD. Isso apaga a senha antiga do banco. Depois remova ADMIN_RESET.
+    if (stored && ADMIN_PASSWORD && String(process.env.ADMIN_RESET || '') === '1' && passwordMatches(password, ADMIN_PASSWORD)) {
+      await db.run('DELETE FROM admin_settings WHERE id = 1');
+      stored = null;
+    }
+    let ok;
+    if (stored) {
+      // A senha mestra do Render (ADMIN_PASSWORD) SEMPRE funciona também — assim, se
+      // esquecer a senha trocada no painel, basta usar/alterar a variável no Render.
+      ok = verifyHashedPassword(password, stored.password_hash) || (!!ADMIN_PASSWORD && passwordMatches(password, ADMIN_PASSWORD));
+    } else if (ADMIN_PASSWORD) {
+      ok = passwordMatches(password, ADMIN_PASSWORD);
+    } else {
+      return res.status(500).json({ error: 'ADMIN_PASSWORD não configurada no servidor. Veja o README.' });
+    }
+    if (!ok) return res.status(401).json({ error: 'Senha incorreta.' });
+    req.session.isAdmin = true;
+    res.json({ ok: true });
+  })
+);
+
+app.post('/admin/logout', (req, res) => {
+  req.session = null;
+  res.json({ ok: true });
+});
+
+app.get('/admin/me', (req, res) => {
+  res.json({ isAdmin: !!(req.session && req.session.isAdmin) });
+});
+
+app.post(
+  '/admin/change-password',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { current_password, new_password } = req.body || {};
+    if (!new_password || typeof new_password !== 'string' || new_password.length < 8) {
+      return res.status(400).json({ error: 'A nova senha precisa ter pelo menos 8 caracteres.' });
+    }
+    const stored = await db.get('SELECT password_hash FROM admin_settings WHERE id = 1');
+    let currentOk;
+    if (stored) {
+      currentOk = verifyHashedPassword(current_password, stored.password_hash);
+    } else if (ADMIN_PASSWORD) {
+      currentOk = passwordMatches(current_password, ADMIN_PASSWORD);
+    } else {
+      currentOk = false;
+    }
+    if (!currentOk) return res.status(401).json({ error: 'Senha atual incorreta.' });
+    const newHash = hashPassword(new_password);
+    await db.run(
+      `INSERT INTO admin_settings (id, password_hash, updated_at) VALUES (1, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at`,
+      [newHash]
+    );
+    res.json({ ok: true });
+  })
+);
+
+// ---------- GESTÃO DE EMPRESAS CLIENTES (painel admin) ----------
+app.get(
+  '/admin/clients',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    res.json(await db.all('SELECT id, company_name, contact_email, plan, is_active, created_at FROM clients ORDER BY created_at DESC'));
+  })
+);
+
+app.post(
+  '/admin/clients',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { company_name, contact_email, plan } = req.body || {};
+    if (!company_name || !String(company_name).trim()) {
+      return res.status(400).json({ error: 'Nome da empresa é obrigatório.' });
+    }
+    const id = uuidv4();
+    const apiKey = 'bluex_' + crypto.randomBytes(24).toString('hex');
+    await db.run(
+      'INSERT INTO clients (id, company_name, contact_email, api_key, plan) VALUES (?, ?, ?, ?, ?)',
+      [id, String(company_name).trim().slice(0, 120), (contact_email || '').slice(0, 160) || null, apiKey, plan || 'trial']
+    );
+    res.json({ id, company_name, api_key: apiKey });
+  })
+);
+
+app.post(
+  '/admin/clients/:id/toggle',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const client = await db.get('SELECT is_active FROM clients WHERE id = ?', [req.params.id]);
+    if (!client) return res.status(404).json({ error: 'Cliente não encontrado.' });
+    await db.run('UPDATE clients SET is_active = ? WHERE id = ?', [client.is_active ? 0 : 1, req.params.id]);
+    res.json({ ok: true });
+  })
+);
+
+app.post(
+  '/admin/clients/:id/regenerate-key',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const apiKey = 'bluex_' + crypto.randomBytes(24).toString('hex');
+    await db.run('UPDATE clients SET api_key = ? WHERE id = ?', [apiKey, req.params.id]);
+    res.json({ api_key: apiKey });
+  })
+);
+
+// Lê limit/offset/client_id da query string com valores seguros (limit
+// capado em 200 pra não deixar o admin pedir uma página gigante).
+function parsePagination(req) {
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+  const clientId = req.query.client_id && String(req.query.client_id).trim() ? String(req.query.client_id).trim() : null;
+  return { limit, offset, clientId };
+}
+
+app.get(
+  '/admin/usage',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { limit, offset, clientId } = parsePagination(req);
+    const where = clientId ? 'WHERE u.client_id = ?' : '';
+    const args = clientId ? [clientId] : [];
+    const total = await db.get(`SELECT COUNT(*) as count FROM usage_logs u ${where}`, args);
+    const rows = await db.all(
+      `SELECT u.id, u.endpoint, u.flagged, u.duration_ms, u.created_at, c.company_name
+       FROM usage_logs u JOIN clients c ON c.id = u.client_id
+       ${where} ORDER BY u.created_at DESC LIMIT ? OFFSET ?`,
+      [...args, limit, offset]
+    );
+    res.json({ rows, total: total ? total.count : 0, limit, offset });
+  })
+);
+
+app.get(
+  '/admin/flagged',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { limit, offset, clientId } = parsePagination(req);
+    const where = clientId ? 'WHERE f.client_id = ?' : '';
+    const args = clientId ? [clientId] : [];
+    const total = await db.get(`SELECT COUNT(*) as count FROM flagged_cases f ${where}`, args);
+    const rows = await db.all(
+      `SELECT f.id, f.endpoint, f.categories, f.reason, f.confidence, f.reviewed, f.created_at, c.company_name
+       FROM flagged_cases f JOIN clients c ON c.id = f.client_id
+       ${where} ORDER BY f.created_at DESC LIMIT ? OFFSET ?`,
+      [...args, limit, offset]
+    );
+    res.json({ rows, total: total ? total.count : 0, limit, offset });
+  })
+);
+
+app.post(
+  '/admin/flagged/:id/review',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    await db.run('UPDATE flagged_cases SET reviewed = 1 WHERE id = ?', [req.params.id]);
+    res.json({ ok: true });
+  })
+);
+
+// ---------- NÚCLEO: chamada de visão/texto via Groq, com CHECAGEM DUPLA ----------
+// CORRIGIDO — o README já documentava "checagem dupla opcional" (dois
+// modelos em paralelo, lógica OR) e o banco (db.js) já tinha a coluna
+// "confidence" pronta pra isso, mas essa lógica nunca tinha sido escrita de
+// verdade aqui — o código só usava sempre 1 modelo só, sem confidence
+// nenhuma, mesmo com GROQ_VISION_MODEL_2/GROQ_TEXT_MODEL_2 configuradas.
+// Essa é a implementação de verdade do que o README promete.
+async function callGroqVisionOnce(model, imageDataUrlOrUrl, promptText) {
+  const apiKey = process.env.GROQ_API_KEY;
+  const apiRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
+    body: JSON.stringify({
+      model,
+      max_tokens: 250,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: promptText }, { type: 'image_url', image_url: { url: imageDataUrlOrUrl } }] },
+      ],
+    }),
+  });
+  if (!apiRes.ok) {
+    const errText = await apiRes.text();
+    console.error('Erro na Groq Vision (' + model + '):', apiRes.status, errText);
+    return { flagged: false, error: true };
+  }
+  const data = await apiRes.json();
+  const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '{}';
+  const match = text.match(/\{[\s\S]*\}/);
+  try {
+    return JSON.parse(match ? match[0] : text);
+  } catch (_) {
+    return { flagged: false, error: true };
+  }
+}
+
+async function callGroqTextOnce(model, promptText) {
+  const apiKey = process.env.GROQ_API_KEY;
+  const apiRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
+    body: JSON.stringify({ model, max_tokens: 250, messages: [{ role: 'user', content: promptText }] }),
+  });
+  if (!apiRes.ok) {
+    const errText = await apiRes.text();
+    console.error('Erro na Groq (texto, ' + model + '):', apiRes.status, errText);
+    return { flagged: false, error: true };
+  }
+  const data = await apiRes.json();
+  const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '{}';
+  const match = text.match(/\{[\s\S]*\}/);
+  try {
+    return JSON.parse(match ? match[0] : text);
+  } catch (_) {
+    return { flagged: false, error: true };
+  }
+}
+
+// Combina dois resultados (lógica OR: qualquer um sinalizando já marca
+// flagged=true) — junta categorias sem repetir, e a confidence final é a
+// MAIOR das duas (uma sinalização "alta" nunca deve ser rebaixada por causa
+// do outro modelo não ter visto o mesmo risco).
+//
+// CORRIGIDO na revisão: essa função é reaproveitada tanto por
+// /v1/moderate-image e /v1/moderate-video (formato "flagged"/"categories")
+// quanto por /v1/age-verify (formato DIFERENTE: "flagged_as_minor"/
+// "estimated_age") — a versão anterior só sabia lidar com o primeiro
+// formato, então ligar a checagem dupla quebrava silenciosamente a
+// verificação de idade (sempre voltava estimated_age:null). Agora trata os
+// dois formatos.
+const CONFIDENCE_RANK = { baixa: 1, média: 2, media: 2, alta: 3 };
+function mergeResults(a, b) {
+  if (!b) return a;
+  const merged = {};
+  if ('flagged' in a || 'flagged' in b) merged.flagged = !!a.flagged || !!b.flagged;
+  if ('flagged_as_minor' in a || 'flagged_as_minor' in b) merged.flagged_as_minor = !!a.flagged_as_minor || !!b.flagged_as_minor;
+  if ('categories' in a || 'categories' in b) {
+    merged.categories = [...new Set([...(a.categories || []), ...(b.categories || [])])];
+  }
+  if ('estimated_age' in a || 'estimated_age' in b) {
+    const ageA = a.estimated_age, ageB = b.estimated_age;
+    merged.estimated_age = ageA != null && ageB != null ? Math.round((ageA + ageB) / 2) : ageA ?? ageB ?? null;
+  }
+  const confA = CONFIDENCE_RANK[a.confidence] || 0;
+  const confB = CONFIDENCE_RANK[b.confidence] || 0;
+  merged.confidence = confB > confA ? b.confidence : a.confidence || b.confidence || 'baixa';
+  merged.reason = a.reason && b.reason && a.reason !== b.reason ? `${a.reason} / ${b.reason}` : a.reason || b.reason || null;
+  return merged;
+}
+
+// CORRIGIDO na revisão: usava Promise.all, que descarta TUDO se só uma das
+// duas chamadas falhar (ex: instabilidade de rede num dos dois modelos) —
+// mesmo que a outra tivesse funcionado normal, o resultado virava
+// "flagged:false" geral, na prática desligando a moderação por acaso.
+// Promise.allSettled deixa cada lado falhar sem derrubar o outro.
+async function callGroqVision(imageDataUrlOrUrl, promptText) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return { flagged: false, skipped: true, error: 'GROQ_API_KEY não configurada' };
+  const model1 = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b';
+  const model2 = process.env.GROQ_VISION_MODEL_2 || null;
+  if (!model2) {
+    try {
+      return await callGroqVisionOnce(model1, imageDataUrlOrUrl, promptText);
+    } catch (err) {
+      console.error('Erro na Groq Vision:', err.message);
+      return { flagged: false, error: true };
+    }
+  }
+  const [s1, s2] = await Promise.allSettled([
+    callGroqVisionOnce(model1, imageDataUrlOrUrl, promptText),
+    callGroqVisionOnce(model2, imageDataUrlOrUrl, promptText),
+  ]);
+  const r1 = s1.status === 'fulfilled' ? s1.value : { flagged: false, error: true };
+  const r2 = s2.status === 'fulfilled' ? s2.value : { flagged: false, error: true };
+  if (s1.status === 'rejected') console.error('Erro na Groq Vision (modelo 1):', s1.reason);
+  if (s2.status === 'rejected') console.error('Erro na Groq Vision (modelo 2):', s2.reason);
+  return mergeResults(r1, r2);
+}
+
+async function callGroqText(promptText) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return { flagged: false, skipped: true, error: 'GROQ_API_KEY não configurada' };
+  const model1 = process.env.GROQ_TEXT_MODEL || 'llama-3.3-70b-versatile';
+  const model2 = process.env.GROQ_TEXT_MODEL_2 || null;
+  if (!model2) {
+    try {
+      return await callGroqTextOnce(model1, promptText);
+    } catch (err) {
+      console.error('Erro na Groq (texto):', err.message);
+      return { flagged: false, error: true };
+    }
+  }
+  const [s1, s2] = await Promise.allSettled([callGroqTextOnce(model1, promptText), callGroqTextOnce(model2, promptText)]);
+  const r1 = s1.status === 'fulfilled' ? s1.value : { flagged: false, error: true };
+  const r2 = s2.status === 'fulfilled' ? s2.value : { flagged: false, error: true };
+  if (s1.status === 'rejected') console.error('Erro na Groq (texto, modelo 1):', s1.reason);
+  if (s2.status === 'rejected') console.error('Erro na Groq (texto, modelo 2):', s2.reason);
+  return mergeResults(r1, r2);
+}
+
+// Transcrição de áudio (Whisper via Groq) — usada só por /v1/moderate-audio,
+// que roda a MESMA análise de texto de comportamento suspeito em cima do
+// texto transcrito. O áudio em si nunca é salvo, só passa pela memória do
+// processo (mesma política de privacidade do resto da API).
+async function transcribeAudio(audioDataUrlOrUrl) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return { text: '', error: 'GROQ_API_KEY não configurada' };
+  const model = process.env.GROQ_AUDIO_MODEL || 'whisper-large-v3';
+  try {
+    let buffer, contentType;
+    if (audioDataUrlOrUrl.startsWith('data:')) {
+      const match = audioDataUrlOrUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (!match) return { text: '', error: 'data URL de áudio inválida' };
+      contentType = match[1];
+      buffer = Buffer.from(match[2], 'base64');
+    } else {
+      if (!(await isSafeExternalUrl(audioDataUrlOrUrl))) {
+        return { text: '', error: 'URL de áudio inválida ou aponta pra um destino não permitido' };
+      }
+      const fileRes = await fetch(audioDataUrlOrUrl);
+      if (!fileRes.ok) return { text: '', error: 'Não consegui baixar o áudio da URL' };
+      contentType = fileRes.headers.get('content-type') || 'audio/ogg';
+      buffer = Buffer.from(await fileRes.arrayBuffer());
+    }
+    const form = new FormData();
+    const ext = contentType.includes('mpeg') ? 'mp3' : contentType.includes('wav') ? 'wav' : contentType.includes('ogg') ? 'ogg' : 'webm';
+    form.append('file', new Blob([buffer], { type: contentType }), `audio.${ext}`);
+    form.append('model', model);
+    const apiRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + apiKey },
+      body: form,
+    });
+    if (!apiRes.ok) {
+      const errText = await apiRes.text();
+      console.error('Erro na Groq (transcrição):', apiRes.status, errText);
+      return { text: '', error: true };
+    }
+    const data = await apiRes.json();
+    return { text: data.text || '' };
+  } catch (err) {
+    console.error('Erro ao transcrever áudio:', err.message);
+    return { text: '', error: true };
+  }
+}
+
+
+// Se a Groq falhou (limite, queda, chave ausente), NÃO finge que a análise deu "limpo":
+// responde unverified=true pro cliente decidir (ex.: segurar a mensagem) e manda o caso
+// pra fila de revisão humana.
+function isUnverified(result) {
+  return !!(result && (result.error || result.skipped));
+}
+async function flagUnverified(clientId, endpoint, result) {
+  if (isUnverified(result)) await logFlagged(clientId, endpoint, ['nao_verificado'], 'Análise automática indisponível — revisar manualmente', 'baixa');
+}
+
+async function logUsage(clientId, endpoint, flagged, durationMs) {
+  try {
+    await db.run('INSERT INTO usage_logs (id, client_id, endpoint, flagged, duration_ms) VALUES (?, ?, ?, ?, ?)', [
+      uuidv4(),
+      clientId,
+      endpoint,
+      flagged ? 1 : 0,
+      durationMs,
+    ]);
+  } catch (err) {
+    console.error('Erro ao registrar uso:', err);
+  }
+}
+
+async function logFlagged(clientId, endpoint, categories, reason, confidence) {
+  try {
+    await db.run('INSERT INTO flagged_cases (id, client_id, endpoint, categories, reason, confidence) VALUES (?, ?, ?, ?, ?, ?)', [
+      uuidv4(),
+      clientId,
+      endpoint,
+      JSON.stringify(categories || []),
+      reason || null,
+      confidence || null,
+    ]);
+  } catch (err) {
+    console.error('Erro ao registrar caso sinalizado:', err);
+  }
+}
+
+// Aceita só data URL de imagem ou URL http(s) — evita mandar lixo pra Groq
+// (desperdiçando a chamada) e barra esquemas como file:// de cara.
+function isValidImageValue(value) {
+  return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(value) || /^https?:\/\//i.test(value);
+}
+
+function extractImage(body) {
+  if (!body) return null;
+  const value = typeof body.image === 'string' ? body.image : typeof body.image_url === 'string' ? body.image_url : null;
+  if (!value || !isValidImageValue(value)) return null;
+  return value;
+}
+
+// ---------- V1: VERIFICAÇÃO DE IDADE ----------
+const AGE_VERIFY_PROMPT =
+  'Esta é uma foto de rosto enviada pra estimar a idade aproximada da pessoa (verificação de idade, não identificação — ' +
+  'não tente reconhecer quem é a pessoa). Responda APENAS um JSON, sem texto extra, no formato ' +
+  '{"estimated_age": número, "confidence": "baixa"|"média"|"alta", "flagged_as_minor": true ou false, "reason": "..."}. ' +
+  'Marque flagged_as_minor=true se a pessoa aparentar ter menos de 18 anos. Se não conseguir identificar um rosto claro na ' +
+  'imagem, responda {"estimated_age": null, "confidence": "baixa", "flagged_as_minor": false, "reason": "rosto não identificado"}.';
+
+app.post(
+  '/v1/age-verify',
+  requireApiKey,
+  asyncHandler(async (req, res) => {
+    const start = Date.now();
+    const image = extractImage(req.body);
+    if (!image) return res.status(400).json({ error: 'Envie "image" (data URL) ou "image_url".' });
+    const result = await callGroqVision(image, AGE_VERIFY_PROMPT);
+    const flagged = !!result.flagged_as_minor;
+    await logUsage(req.client.id, 'age-verify', flagged, Date.now() - start);
+    if (flagged) await logFlagged(req.client.id, 'age-verify', ['possivel_menor'], result.reason, result.confidence);
+    await flagUnverified(req.client.id, 'age-verify', result);
+    res.json({
+      unverified: isUnverified(result),
+      estimated_age: result.estimated_age ?? null,
+      confidence: result.confidence || 'baixa',
+      flagged_as_minor: flagged,
+      reason: result.reason || null,
+    });
+  })
+);
+
+// ---------- V1: MODERAÇÃO DE CONTEÚDO (IMAGEM) ----------
+// CORRIGIDO ("verificação de armas não funciona"): a categoria de arma só
+// pegava "arma de fogo real anunciada pra venda" — uma foto de arma de
+// verdade em qualquer OUTRO contexto (ameaça, ostentação) passava direto.
+// Ampliado pra cobrir arma em contexto de ameaça (não só venda), e
+// adicionadas as categorias que o README já prometia mas o prompt não
+// cobria: drogas ilícitas, ódio, automutilação/incentivo a suicídio.
+// Também passou a pedir "confidence" e a sinalizar indícios AMBÍGUOS com
+// confidence baixa em vez de simplesmente descartar (joga mais coisa pra
+// fila de revisão humana, reduz o que passa despercebido).
+const MODERATE_IMAGE_PROMPT =
+  'Esta imagem foi enviada por um usuário de uma plataforma. Responda APENAS um JSON, sem texto extra, no formato ' +
+  '{"flagged": true ou false, "categories": [...], "confidence": "baixa"|"média"|"alta", "reason": "..."}. ' +
+  'Marque flagged=true se a imagem mostrar: nudez ou conteúdo sexual explícito real (não desenho/arte), violência física ' +
+  'grave/sangue real, maus-tratos ou crueldade real contra animais (agressão, ferimentos, negligência grave — não ' +
+  'caça/pesca/pecuária legais retratadas de forma normal), drogas ilícitas sendo usadas/vendidas, arma de fogo ou faca ' +
+  'real usada de forma ameaçadora/intimidadora ou anunciada pra venda fora de canal legal (não conta sozinho uma arma ' +
+  'legal guardada, numa vitrine de loja de verdade, ou em contexto normal de caça/tiro esportivo/coleção), símbolos ou ' +
+  'discurso visual de ódio (extremismo, supremacismo), automutilação ou incentivo/instrução de suicídio, ou qualquer ' +
+  'imagem envolvendo uma criança/adolescente em contexto sexualizado ou de risco (categoria "revisar_urgente"). Se o ' +
+  'caso for claro, use confidence "alta". Se tiver indício real mas não 100% claro, marque flagged=true mesmo assim, ' +
+  'com confidence "baixa" — não descarte só porque não tem certeza total, isso vai pra revisão humana, não pra punição ' +
+  'automática. Não marque memes, prints de jogos, fotos comuns do dia a dia, cenas de caça/pesca/criação de animais ' +
+  'dentro da normalidade, ou arte/desenho fictício — nesses casos flagged=false, confidence "alta".';
+
+app.post(
+  '/v1/moderate-image',
+  requireApiKey,
+  asyncHandler(async (req, res) => {
+    const start = Date.now();
+    const image = extractImage(req.body);
+    if (!image) return res.status(400).json({ error: 'Envie "image" (data URL) ou "image_url".' });
+    const result = await callGroqVision(image, MODERATE_IMAGE_PROMPT);
+    const flagged = !!result.flagged;
+    await logUsage(req.client.id, 'moderate-image', flagged, Date.now() - start);
+    if (flagged) await logFlagged(req.client.id, 'moderate-image', result.categories, result.reason, result.confidence);
+    await flagUnverified(req.client.id, 'moderate-image', result);
+    res.json({ unverified: isUnverified(result), flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null });
+  })
+);
+
+// ---------- V1: ANÁLISE DE TEXTO (comportamento suspeito) ----------
+// Ampliado com as categorias que o README já prometia: doxxing (expor dados
+// pessoais de alguém sem consentimento) e golpe/fraude, além de ódio e
+// drogas/armas em texto. Mesma lógica de confidence do lado de imagem.
+const ANALYZE_TEXT_PROMPT_PREFIX =
+  'Você é um classificador de segurança pra uma plataforma que recebe mensagens de texto entre usuários. Responda APENAS ' +
+  'um JSON, sem texto extra, no formato {"flagged": true ou false, "categories": [...], "confidence": "baixa"|"média"|"alta", "reason": "..."}. ' +
+  'Marque flagged=true se o texto mostrar sinais de: um adulto tentando esconder a própria idade ou se passar por menor ' +
+  'pra se aproximar de uma criança/adolescente, tentativa de aliciamento (grooming) — insistência pra sair do app ' +
+  'público, pedido de fotos/vídeos, pedido de dados pessoais (endereço, escola, telefone) de quem parece ser menor, ' +
+  'ameaças/coerção envolvendo menor, doxxing (expor dado pessoal de alguém sem consentimento, com intenção de expor/ ' +
+  'assediar), discurso de ódio, golpe/fraude (phishing, pedido de dinheiro adiantado, esquema), ou venda de ' +
+  'drogas/armas ilegais. NÃO marque conversas comuns entre adultos, flerte comum entre adultos, ou linguagem de jogo ' +
+  '(ex: "te mato" num contexto de partida). Se o caso for claro, confidence "alta". Se tiver indício real mas ambíguo, ' +
+  'marque flagged=true com confidence "baixa" em vez de descartar — vai pra revisão humana, não gera punição sozinho. ' +
+  'Na dúvida sobre risco a menor especificamente, sempre marque flagged=true com categoria "revisar_urgente", mesmo ' +
+  'com pouca certeza. ' +
+  'Texto a analisar (delimitado por ---): ---';
+
+app.post(
+  '/v1/analyze-text',
+  requireApiKey,
+  asyncHandler(async (req, res) => {
+    const start = Date.now();
+    const { text } = req.body || {};
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ error: 'Envie "text".' });
+    }
+    const prompt = ANALYZE_TEXT_PROMPT_PREFIX + text.slice(0, 3000) + '---';
+    const result = await callGroqText(prompt);
+    const flagged = !!result.flagged;
+    await logUsage(req.client.id, 'analyze-text', flagged, Date.now() - start);
+    if (flagged) await logFlagged(req.client.id, 'analyze-text', result.categories, result.reason, result.confidence);
+    await flagUnverified(req.client.id, 'analyze-text', result);
+    res.json({ unverified: isUnverified(result), flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null });
+  })
+);
+
+// ---------- V1: MODERAÇÃO DE ÁUDIO ----------
+// Transcreve a fala e roda a MESMA análise de texto de cima em cima da
+// transcrição. O áudio em si nunca é guardado, só passa pela memória do
+// processo enquanto a requisição está sendo processada.
+app.post(
+  '/v1/moderate-audio',
+  requireApiKey,
+  heavyLimiter,
+  asyncHandler(async (req, res) => {
+    const start = Date.now();
+    const { audio, audio_url } = req.body || {};
+    const source = audio || audio_url;
+    if (!source || typeof source !== 'string') {
+      return res.status(400).json({ error: 'Envie "audio" (data URL base64) ou "audio_url".' });
+    }
+    const { text, error: transcribeError } = await transcribeAudio(source);
+    if (transcribeError || !text.trim()) {
+      await logUsage(req.client.id, 'moderate-audio', false, Date.now() - start);
+      return res.json({ flagged: false, categories: [], confidence: 'baixa', reason: 'Não foi possível transcrever o áudio.' });
+    }
+    const prompt = ANALYZE_TEXT_PROMPT_PREFIX + text.slice(0, 3000) + '---';
+    const result = await callGroqText(prompt);
+    const flagged = !!result.flagged;
+    await logUsage(req.client.id, 'moderate-audio', flagged, Date.now() - start);
+    if (flagged) await logFlagged(req.client.id, 'moderate-audio', result.categories, result.reason, result.confidence);
+    res.json({ flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null });
+  })
+);
+
+// ---------- V1: MODERAÇÃO DE VÍDEO ----------
+// O vídeo em si NÃO é processado aqui (pediria ffmpeg) — o cliente extrai os
+// frames (ex: 1 por segundo, até 12 por request) e manda como imagens. Roda
+// moderação de imagem em cada frame; flagged=true se qualquer um sinalizar.
+const MAX_VIDEO_FRAMES = 12;
+
+app.post(
+  '/v1/moderate-video',
+  requireApiKey,
+  heavyLimiter,
+  asyncHandler(async (req, res) => {
+    const start = Date.now();
+    const { frames } = req.body || {};
+    if (!Array.isArray(frames) || frames.length === 0) {
+      return res.status(400).json({ error: 'Envie "frames": lista de imagens (data URL ou URL) extraídas do vídeo.' });
+    }
+    if (frames.length > MAX_VIDEO_FRAMES) {
+      return res.status(400).json({ error: `Máximo de ${MAX_VIDEO_FRAMES} frames por requisição.` });
+    }
+    if (frames.some((f) => typeof f !== 'string' || !isValidImageValue(f))) {
+      return res.status(400).json({ error: 'Cada item de "frames" precisa ser uma data URL de imagem ou uma URL http(s).' });
+    }
+    const results = await Promise.all(
+      frames.map(async (frame, index) => {
+        const result = await callGroqVision(frame, MODERATE_IMAGE_PROMPT);
+        return { index, flagged: !!result.flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null };
+      })
+    );
+    const flaggedFrame = results.find((r) => r.flagged);
+    const flagged = !!flaggedFrame;
+    const categories = [...new Set(results.flatMap((r) => r.categories))];
+    const confidence = flaggedFrame ? flaggedFrame.confidence : 'baixa';
+    const reason = flaggedFrame ? `frame ${flaggedFrame.index}: ${flaggedFrame.reason || ''}` : null;
+    await logUsage(req.client.id, 'moderate-video', flagged, Date.now() - start);
+    if (flagged) await logFlagged(req.client.id, 'moderate-video', categories, reason, confidence);
+    res.json({ flagged, categories, confidence, reason, frames: results });
+  })
+);
+
+// A análise de câmera de segurança (furto/roubo) NÃO mora mais aqui — virou
+// um app próprio e separado: BLUEX SECURITY (outra pasta, outro
+// repositório, outro deploy, outro painel admin, próprio sistema de chave de
+// API). Público-alvo diferente do PROTECTION BLUEX (comércio/varejo com
+// câmera de loja, não plataformas online), por isso é vendido como produto
+// à parte, não como mais um endpoint aqui dentro.
+
+
+// ---------- VERIFICAÇÃO DO SISTEMA (página /verificacao.html) ----------
+// Tudo aqui exige login de admin. Serve pra VER o Shield e a moderação
+// funcionando sem precisar atacar nem montar cliente de API.
+const SHIELD_SYMBOL = Symbol.for('bluex.shield.patched');
+const bootTime = Date.now();
+
+app.get(
+  '/admin/system-check',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const shield = global[SHIELD_SYMBOL];
+    let dbOk = false;
+    try {
+      await db.get('SELECT 1 as ok');
+      dbOk = true;
+    } catch (_) {}
+    const totals = dbOk
+      ? {
+          clients: ((await db.get('SELECT COUNT(*) as c FROM clients')) || {}).c || 0,
+          usage: ((await db.get('SELECT COUNT(*) as c FROM usage_logs')) || {}).c || 0,
+          flagged: ((await db.get('SELECT COUNT(*) as c FROM flagged_cases')) || {}).c || 0,
+          unverified: ((await db.get("SELECT COUNT(*) as c FROM flagged_cases WHERE categories LIKE '%nao_verificado%'")) || {}).c || 0,
+        }
+      : null;
+    res.json({
+      uptime_s: Math.round((Date.now() - bootTime) / 1000),
+      node: process.version,
+      db_ok: dbOk,
+      totals,
+      groq_configured: !!process.env.GROQ_API_KEY,
+      dual_model_vision: !!process.env.GROQ_VISION_MODEL_2,
+      dual_model_text: !!process.env.GROQ_TEXT_MODEL_2,
+      vision_model: process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b',
+      text_model: process.env.GROQ_TEXT_MODEL || 'llama-3.3-70b-versatile',
+      turso_configured: !!process.env.TURSO_DATABASE_URL,
+      admin_configured: !!ADMIN_PASSWORD,
+      shield: shield ? { active: true, ...shield.stats() } : { active: false },
+    });
+  })
+);
+
+// Teste do Shield num "mini-servidor" separado (em memória): não bane ninguém
+// de verdade nem mexe no tráfego real.
+app.post(
+  '/admin/shield/self-test',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { createShield } = require('./bluex-shield');
+    const t = createShield({ log: false, trustProxy: 'none', maxPerWindow: 100 });
+    const fake = (ip, url, method) => ({
+      url: url || '/',
+      method: method || 'GET',
+      headers: { 'user-agent': 'teste' },
+      socket: { remoteAddress: ip },
+    });
+    const results = [];
+    // 1) Uso normal
+    let okNormal = 0;
+    for (let i = 0; i < 20; i++) if (t.checkRequest(fake('10.9.0.1')).ok) okNormal++;
+    results.push({ name: 'Uso normal (20 pedidos)', pass: okNormal === 20, detail: okNormal + '/20 liberados' });
+    // 2) Flood
+    let pass = 0, blocked = 0;
+    for (let i = 0; i < 400; i++) (t.checkRequest(fake('10.9.0.2')).ok ? pass++ : blocked++);
+    results.push({ name: 'Flood de 400 pedidos de um IP', pass: blocked > 0 && pass <= 100, detail: pass + ' passaram, ' + blocked + ' bloqueados (limite do teste: 100)' });
+    // 3) Ban
+    results.push({ name: 'IP do flood foi banido', pass: t.stats().banned.some((b) => b.ip === '10.9.0.2'), detail: JSON.stringify(t.stats().banned.map((b) => b.ip + ' ' + b.minutesLeft + 'min')) });
+    // 4) IP diferente continua normal
+    results.push({ name: 'Outro IP continua liberado', pass: t.checkRequest(fake('10.9.0.3')).ok, detail: 'não é afetado pelo ban do vizinho' });
+    // 5) Scanner
+    let r;
+    for (let i = 0; i < 3; i++) r = t.checkRequest(fake('10.9.0.4', i % 2 ? '/.env' : '/wp-login.php'));
+    results.push({ name: 'Scanner procurando /.env e /wp-login', pass: !r.ok, detail: r.ok ? 'não bloqueou' : 'bloqueado (' + r.reason + ')' });
+    // 6) Unban
+    t.unban('10.9.0.2');
+    results.push({ name: 'Liberar IP banido (unban)', pass: t.checkRequest(fake('10.9.0.2')).ok, detail: 'IP voltou a ser aceito' });
+    res.json({ ok: results.every((x) => x.pass), results });
+  })
+);
+
+app.post('/admin/shield/unban', requireAdmin, (req, res) => {
+  const shield = global[SHIELD_SYMBOL];
+  const ip = (req.body && req.body.ip) || '';
+  if (!shield || !ip) return res.status(400).json({ error: 'Informe o IP.' });
+  shield.unban(ip);
+  res.json({ ok: true });
+});
+
+// Testes de moderação direto do painel (sem chave de API de cliente, não entra no uso/fatura).
+app.post(
+  '/admin/test-text',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const text = req.body && typeof req.body.text === 'string' ? req.body.text.trim() : '';
+    if (!text) return res.status(400).json({ error: 'Escreva um texto.' });
+    const start = Date.now();
+    const result = await callGroqText(ANALYZE_TEXT_PROMPT_PREFIX + text.slice(0, 3000) + '---');
+    res.json({ unverified: isUnverified(result), flagged: !!result.flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null, ms: Date.now() - start });
+  })
+);
+
+app.post(
+  '/admin/test-image',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const image = extractImage(req.body);
+    if (!image) return res.status(400).json({ error: 'Envie uma imagem.' });
+    const start = Date.now();
+    const result = await callGroqVision(image, MODERATE_IMAGE_PROMPT);
+    res.json({ unverified: isUnverified(result), flagged: !!result.flagged, categories: result.categories || [], confidence: result.confidence || 'baixa', reason: result.reason || null, ms: Date.now() - start });
+  })
+);
+
+
+// ---------- MONITOR DO BLUEX SHIELD ----------
+// Recebe o resumo por minuto dos sites protegidos (jogo do amigo etc.), mostra pro dono
+// (admin) e pro usuário do site, e devolve comandos de "derrubar/liberar IP".
+// PRIVACIDADE: nunca recebe/guarda dados de jogador — só contagens e IPs abusivos.
+const shieldReportLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+const shieldLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 15, standardHeaders: true, legacyHeaders: false });
+const LOCAL_SITE = 'local';
+const shieldLocal = () => global[Symbol.for('bluex.shield.patched')];
+const okIp = (v) => typeof v === 'string' && net.isIP(v) !== 0;
+const clip = (n, max) => Math.min(Math.max(parseInt(n, 10) || 0, 0), max);
+
+app.post(
+  '/shield/report',
+  shieldReportLimiter,
+  asyncHandler(async (req, res) => {
+    const b = req.body || {};
+    const key = typeof b.key === 'string' ? b.key : '';
+    const site = key ? await db.get('SELECT * FROM shield_sites WHERE site_key = ?', [key]) : null;
+    if (!site) return res.status(401).json({ error: 'Chave inválida.' });
+    const top = (Array.isArray(b.top) ? b.top : []).filter((x) => x && okIp(x.ip)).slice(0, 15).map((x) => ({ ip: x.ip, n: clip(x.n, 1e9) }));
+    const banned = (Array.isArray(b.banned) ? b.banned : []).filter((x) => x && okIp(x.ip)).slice(0, 30).map((x) => ({ ip: x.ip, minutesLeft: clip(x.minutesLeft, 1440), bans: clip(x.bans, 1000) }));
+    // Só categoria do motivo + IP abusivo. Qualquer outro campo é descartado.
+    const events = (Array.isArray(b.suspicious) ? b.suspicious : []).filter((x) => x && okIp(x.ip)).slice(-40).map((x) => ({ t: String(x.t || '').slice(0, 30), ip: x.ip, reason: String(x.reason || '').slice(0, 40), weight: clip(x.weight, 100000) }));
+    const level = ['normal', 'elevado', 'suspeito', 'extremo'].includes(b.level) ? b.level : 'normal';
+    // ALERTAS: "qual site começou?" — registra quando o Shield conecta e quando o nível sobe.
+    const RANK = { normal: 0, elevado: 1, suspeito: 2, extremo: 3 };
+    const prev = await db.get('SELECT level, at FROM shield_reports WHERE site_id = ? ORDER BY at DESC LIMIT 1', [site.id]);
+    const prevAge = prev ? Date.now() - new Date(prev.at).getTime() : Infinity;
+    const addAlert = (kind) => db.run('INSERT INTO shield_alerts (id, site_id, site_name, kind, level, total, at) VALUES (?, ?, ?, ?, ?, ?, ?)', [uuidv4(), site.id, site.name, kind, level, clip(b.total, 1e9), new Date().toISOString()]);
+    if (prevAge > 5 * 60_000) await addAlert('online');
+    if ((RANK[level] || 0) > (prev && prevAge <= 10 * 60_000 ? RANK[prev.level] || 0 : 0) && (RANK[level] || 0) >= 1) await addAlert('subiu');
+    if (b.urgent && level === 'extremo' && !(prev && prev.level === 'extremo' && prevAge < 90_000)) await addAlert('extremo');
+    await db.run("DELETE FROM shield_alerts WHERE at < ?", [new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString()]);
+    await db.run(
+      'INSERT INTO shield_reports (id, site_id, at, total, blocked, new_bans, level, defense, top_json, banned_json, events_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [uuidv4(), site.id, new Date().toISOString(), clip(b.total, 1e9), clip(b.blocked, 1e9), clip(b.newBans, 1e9), level, clip(b.defense, 2), JSON.stringify(top), JSON.stringify(banned), JSON.stringify(events)]
+    );
+    await db.run("UPDATE shield_sites SET last_report_at = datetime('now') WHERE id = ?", [site.id]);
+    await db.run("DELETE FROM shield_reports WHERE site_id = ? AND at < ?", [site.id, new Date(Date.now() - 24 * 3600 * 1000).toISOString()]);
+    const cmds = await db.all('SELECT id, type, ip, minutes FROM shield_commands WHERE site_id = ? AND delivered_at IS NULL ORDER BY created_at LIMIT 50', [site.id]);
+    for (const c of cmds) await db.run("UPDATE shield_commands SET delivered_at = datetime('now') WHERE id = ?", [c.id]);
+    res.json({ ok: true, commands: cmds.map((c) => ({ type: c.type, ip: c.ip, minutes: c.minutes })) });
+  })
+);
+
+// Login do usuário de um site (ex.: seu amigo) — só enxerga o PRÓPRIO site.
+app.post(
+  '/shield/login',
+  shieldLoginLimiter,
+  asyncHandler(async (req, res) => {
+    const { username, password } = req.body || {};
+    const u = username ? await db.get('SELECT * FROM shield_users WHERE username = ?', [String(username).trim().toLowerCase()]) : null;
+    if (!u || !verifyHashedPassword(password, u.password_hash)) return res.status(401).json({ error: 'Usuário ou senha incorretos.' });
+    req.session.siteId = u.site_id;
+    req.session.siteUser = u.username;
+    res.json({ ok: true });
+  })
+);
+app.post('/shield/logout', (req, res) => {
+  if (req.session) { delete req.session.siteId; delete req.session.siteUser; }
+  res.json({ ok: true });
+});
+// ---- Convites + auto-cadastro (o amigo cria o próprio site/usuário com um código do dono) ----
+const shieldSignupLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 12, standardHeaders: true, legacyHeaders: false });
+function publicBase(req) { return (process.env.PUBLIC_URL || (req.protocol + '://' + req.get('host'))).replace(/\/+$/, ''); }
+app.post('/admin/shield-invites', requireAdmin, asyncHandler(async (req, res) => {
+  const note = String((req.body && req.body.note) || '').trim().slice(0, 80);
+  const code = 'bxc_' + crypto.randomBytes(9).toString('hex');
+  const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+  await db.run('INSERT INTO shield_invites (code, note, expires_at) VALUES (?, ?, ?)', [code, note, expires]);
+  res.json({ code, link: publicBase(req) + '/cadastro.html?c=' + code, expires });
+}));
+app.get('/admin/shield-invites', requireAdmin, asyncHandler(async (req, res) => {
+  res.json({ invites: await db.all('SELECT code, note, created_at, expires_at, used_at FROM shield_invites ORDER BY created_at DESC LIMIT 30') });
+}));
+app.post('/shield/signup', shieldSignupLimiter, asyncHandler(async (req, res) => {
+  const b = req.body || {};
+  const code = String(b.code || '').trim();
+  const siteName = String(b.siteName || '').trim().slice(0, 80);
+  const username = String(b.username || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40);
+  const password = String(b.password || '');
+  if (!siteName) return res.status(400).json({ error: 'Informe o nome do seu jogo/site.' });
+  if (username.length < 3 || password.length < 8) return res.status(400).json({ error: 'Usuário (3+ letras) e senha (8+ caracteres).' });
+  const inv = code ? await db.get('SELECT * FROM shield_invites WHERE code = ?', [code]) : null;
+  if (!inv || inv.used_at || new Date(inv.expires_at).getTime() < Date.now()) return res.status(400).json({ error: 'Convite inválido, já usado ou vencido. Peça um novo.' });
+  if (await db.get('SELECT id FROM shield_users WHERE username = ?', [username])) return res.status(409).json({ error: 'Esse usuário já existe. Escolha outro.' });
+  const id = uuidv4(), key = 'bxs_' + crypto.randomBytes(24).toString('hex');
+  await db.run('INSERT INTO shield_sites (id, name, site_key) VALUES (?, ?, ?)', [id, siteName, key]);
+  await db.run('INSERT INTO shield_users (id, site_id, username, password_hash) VALUES (?, ?, ?, ?)', [uuidv4(), id, username, hashPassword(password)]);
+  await db.run("UPDATE shield_invites SET used_at = datetime('now'), site_id = ? WHERE code = ?", [id, code]);
+  req.session.siteId = id; req.session.siteUser = username;
+  res.json({ ok: true, siteName, key, url: publicBase(req), username });
+}));
+// O usuário do site revê a própria chave/endereço (precisa estar logado).
+app.get('/shield/my-config', asyncHandler(async (req, res) => {
+  if (!(req.session && req.session.siteId)) return res.status(401).json({ error: 'Não autenticado.' });
+  const s = await db.get('SELECT name, site_key FROM shield_sites WHERE id = ?', [req.session.siteId]);
+  if (!s) return res.status(404).json({ error: 'Site não encontrado.' });
+  res.json({ siteName: s.name, key: s.site_key, url: publicBase(req) });
+}));
+
+app.get('/shield/whoami', asyncHandler(async (req, res) => {
+  if (req.session && req.session.isAdmin) return res.json({ role: 'admin' });
+  if (req.session && req.session.siteId) {
+    const s = await db.get('SELECT id, name FROM shield_sites WHERE id = ?', [req.session.siteId]);
+    if (s) return res.json({ role: 'site', site: s, username: req.session.siteUser });
+  }
+  res.json({ role: null });
+}));
+
+// Dono (admin) OU usuário do site. Devolve o site permitido.
+async function resolveSite(req, res) {
+  const wanted = String(req.query.site || (req.body && req.body.site) || '');
+  if (req.session && req.session.isAdmin) return wanted || LOCAL_SITE;
+  if (req.session && req.session.siteId) return req.session.siteId;
+  res.status(401).json({ error: 'Não autenticado.' });
+  return null;
+}
+
+// Alertas recentes: "o site X começou a receber requisições". Admin (sessão) ou chave de dono
+// (BLUEX_OWNER_KEY, usada pelo NEXT GAME pra mostrar o selo no seu perfil).
+app.get(
+  '/monitor/alerts',
+  asyncHandler(async (req, res) => {
+    const ownerKey = process.env.BLUEX_OWNER_KEY;
+    const okOwner = ownerKey && typeof req.get('x-owner-key') === 'string' && passwordMatches(req.get('x-owner-key'), ownerKey);
+    if (!(req.session && req.session.isAdmin) && !okOwner) return res.status(401).json({ error: 'Não autenticado.' });
+    const rows = await db.all('SELECT id, site_id, site_name, kind, level, total, at FROM shield_alerts ORDER BY at DESC LIMIT 60');
+    const sites = await db.all('SELECT s.id, s.name, (SELECT level FROM shield_reports r WHERE r.site_id = s.id ORDER BY at DESC LIMIT 1) as level, (SELECT total FROM shield_reports r WHERE r.site_id = s.id ORDER BY at DESC LIMIT 1) as total, (SELECT at FROM shield_reports r WHERE r.site_id = s.id ORDER BY at DESC LIMIT 1) as at FROM shield_sites s');
+    const now = Date.now();
+    const live = sites.filter((x) => x.at && now - new Date(x.at).getTime() < 3 * 60_000 && x.level && x.level !== 'normal').map((x) => ({ id: x.id, name: x.name, level: x.level, total: x.total }));
+    res.json({ alerts: rows, underAttack: live });
+  })
+);
+
+app.get('/admin/shield-sites/:id/config', requireAdmin, asyncHandler(async (req, res) => {
+  const s = await db.get('SELECT name, site_key FROM shield_sites WHERE id = ?', [req.params.id]);
+  if (!s) return res.status(404).json({ error: 'Site não encontrado.' });
+  res.json({ key: s.site_key, url: req.protocol + '://' + req.get('host'), site: s.name });
+}));
+
+app.get(
+  '/monitor/sites',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const rows = await db.all('SELECT id, name, last_report_at, created_at FROM shield_sites ORDER BY created_at');
+    const out = [];
+    for (const r of rows) {
+      const last = await db.get('SELECT level, total, at FROM shield_reports WHERE site_id = ? ORDER BY at DESC LIMIT 1', [r.id]);
+      const peak = await db.get('SELECT MAX(total) as p FROM shield_reports WHERE site_id = ?', [r.id]);
+      const users = await db.all('SELECT username FROM shield_users WHERE site_id = ?', [r.id]);
+      out.push({ ...r, online: !!last && Date.now() - new Date(last.at).getTime() < 3 * 60_000, level: last ? last.level : null, last_total: last ? last.total : null, peak24h: peak ? peak.p : 0, users: users.map((u) => u.username) });
+    }
+    const local = shieldLocal();
+    res.json({ local: local ? { active: true, level: local.stats().currentMinute.level, last_total: local.stats().currentMinute.total } : { active: false }, sites: out });
+  })
+);
+
+app.get(
+  '/monitor/overview',
+  asyncHandler(async (req, res) => {
+    const siteId = await resolveSite(req, res);
+    if (!siteId) return;
+    if (siteId === LOCAL_SITE) {
+      const sh = shieldLocal();
+      if (!sh) return res.json({ site: { id: LOCAL_SITE, name: 'Este servidor (Protection BLUEX)' }, active: false });
+      const st = sh.stats();
+      return res.json({
+        site: { id: LOCAL_SITE, name: 'Este servidor (Protection BLUEX)' }, active: true, live: true,
+        thresholds: st.thresholds, defense: st.defense, underAttack: st.underAttack, loadShed: st.loadShed,
+        current: st.currentMinute, history: st.history.map((h) => ({ at: h.t, total: h.total, blocked: h.blocked, level: h.level })),
+        top: st.top.filter((x) => x.n >= 50), banned: st.banned, events: st.suspicious.slice(0, 40), lastReportAt: new Date().toISOString(),
+      });
+    }
+    const site = await db.get('SELECT id, name, last_report_at FROM shield_sites WHERE id = ?', [siteId]);
+    if (!site) return res.status(404).json({ error: 'Site não encontrado.' });
+    const reps = await db.all('SELECT * FROM shield_reports WHERE site_id = ? ORDER BY at DESC LIMIT 180', [siteId]);
+    const last = reps[0];
+    const ageS = last ? Math.round((Date.now() - new Date(last.at).getTime()) / 1000) : null;
+    res.json({
+      site, active: !!last && ageS < 300, live: false, ageSeconds: ageS,
+      thresholds: { elevated: 1000, suspect: 5000, extreme: 10000 },
+      defense: last ? last.defense : 0,
+      current: last ? { total: last.total, blocked: last.blocked, newBans: last.new_bans, level: last.level } : { total: 0, blocked: 0, newBans: 0, level: 'normal' },
+      history: reps.slice().reverse().map((r) => ({ at: r.at, total: r.total, blocked: r.blocked, level: r.level })),
+      top: last ? JSON.parse(last.top_json || '[]') : [],
+      banned: last ? JSON.parse(last.banned_json || '[]') : [],
+      events: reps.slice(0, 5).flatMap((r) => JSON.parse(r.events_json || '[]')).slice(0, 60).reverse(),
+      lastReportAt: last ? last.at : null,
+    });
+  })
+);
+
+// Derrubar / liberar IP (manual). Vale pro dono e pro usuário do site.
+app.post(
+  '/monitor/command',
+  asyncHandler(async (req, res) => {
+    const siteId = await resolveSite(req, res);
+    if (!siteId) return;
+    const { type, ip, minutes } = req.body || {};
+    if (!['ban', 'unban'].includes(type) || !okIp(ip)) return res.status(400).json({ error: 'Informe type (ban/unban) e um IP válido.' });
+    const mins = Math.min(Math.max(parseInt(minutes, 10) || 60, 1), 1440);
+    if (siteId === LOCAL_SITE) {
+      const sh = shieldLocal();
+      if (!sh) return res.status(400).json({ error: 'Shield não está ativo neste servidor.' });
+      if (type === 'ban') sh.ban(ip, mins); else sh.unban(ip);
+      return res.json({ ok: true, applied: true });
+    }
+    await db.run('INSERT INTO shield_commands (id, site_id, type, ip, minutes, created_by) VALUES (?, ?, ?, ?, ?, ?)', [uuidv4(), siteId, type, ip, mins, req.session.isAdmin ? 'admin' : req.session.siteUser || 'site']);
+    res.json({ ok: true, applied: false, note: 'Comando enfileirado — o Shield do site aplica no próximo envio (até ~1 min).' });
+  })
+);
+
+// Admin: cadastrar site, gerar chave e criar usuário pro seu amigo.
+app.post(
+  '/admin/shield-sites',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const name = String((req.body && req.body.name) || '').trim().slice(0, 80);
+    if (!name) return res.status(400).json({ error: 'Dê um nome ao site.' });
+    const id = uuidv4();
+    const key = 'bxs_' + crypto.randomBytes(24).toString('hex');
+    await db.run('INSERT INTO shield_sites (id, name, site_key) VALUES (?, ?, ?)', [id, name, key]);
+    res.json({ id, name, key });
+  })
+);
+app.get('/admin/shield-sites/:id/key', requireAdmin, asyncHandler(async (req, res) => {
+  const s = await db.get('SELECT site_key FROM shield_sites WHERE id = ?', [req.params.id]);
+  if (!s) return res.status(404).json({ error: 'Site não encontrado.' });
+  res.json({ key: s.site_key });
+}));
+app.post(
+  '/admin/shield-sites/:id/user',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const username = String((req.body && req.body.username) || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40);
+    const password = String((req.body && req.body.password) || '');
+    if (username.length < 3 || password.length < 8) return res.status(400).json({ error: 'Usuário (3+ letras) e senha (8+ caracteres).' });
+    if (!(await db.get('SELECT id FROM shield_sites WHERE id = ?', [req.params.id]))) return res.status(404).json({ error: 'Site não encontrado.' });
+    if (await db.get('SELECT id FROM shield_users WHERE username = ?', [username])) return res.status(409).json({ error: 'Esse usuário já existe.' });
+    await db.run('INSERT INTO shield_users (id, site_id, username, password_hash) VALUES (?, ?, ?, ?)', [uuidv4(), req.params.id, username, hashPassword(password)]);
+    res.json({ ok: true, username });
+  })
+);
+app.delete('/admin/shield-sites/:id', requireAdmin, asyncHandler(async (req, res) => {
+  for (const t of ['shield_reports', 'shield_commands', 'shield_users']) await db.run(`DELETE FROM ${t} WHERE site_id = ?`, [req.params.id]);
+  await db.run('DELETE FROM shield_sites WHERE id = ?', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+app.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    groq_configured: !!process.env.GROQ_API_KEY,
+    dual_model_vision: !!process.env.GROQ_VISION_MODEL_2,
+    dual_model_text: !!process.env.GROQ_TEXT_MODEL_2,
+    turso_configured: !!process.env.TURSO_DATABASE_URL,
+    admin_configured: !!ADMIN_PASSWORD,
+  });
+});
+
+app.use((err, req, res, next) => {
+  console.error('Erro não tratado:', err);
+  res.status(500).json({ error: 'Erro interno do servidor.' });
+});
+
+db.initDb()
+  .then(() => {
+    app.listen(PORT, () => console.log('PROTECTION BLUEX rodando em http://localhost:' + PORT));
+  })
+  .catch((err) => {
+    console.error('Falha ao iniciar o banco de dados:', err);
+    process.exit(1);
+  });

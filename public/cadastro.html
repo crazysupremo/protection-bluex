@@ -31,14 +31,15 @@ a{color:var(--cy)}
     <button id="go">Criar meu acesso</button>
   </div>
   <div id="done" class="hidden">
-    <p class="ok">✔ Cadastro criado! Guarde estes dados — você vai usá-los no INSTALAR.bat:</p>
+    <p class="ok">✔ Cadastro criado! Guarde estes dados — você vai usá-los no bluex_shield.json do seu jogo:</p>
     <label>Chave</label><code id="k"></code>
     <label>Endereço do painel</label><code id="a"></code>
     <ol>
-      <li>Abra o <b>INSTALAR.bat</b> da pasta que você recebeu.</li>
-      <li>Quando ele pedir, cole a <b>chave</b> e o <b>endereço</b> acima.</li>
-      <li>Depois é só ver tudo no <a href="/monitor.html">Monitor</a> (entre com o usuário e a senha que você acabou de criar).</li>
+      <li>Abra o arquivo <b>bluex_shield.json</b> que fica ao lado do seu jogo (o Shield que você já instalou).</li>
+      <li>Cole a <b>chave</b> em <code style="display:inline;padding:1px 5px;margin:0">"key"</code>, o <b>endereço</b> em <code style="display:inline;padding:1px 5px;margin:0">"url"</code> e o nome do jogo em <code style="display:inline;padding:1px 5px;margin:0">"site"</code>. Salve.</li>
+      <li>Reinicie o servidor do jogo. Em até 1 minuto ele aparece no <a href="/monitor.html">Monitor</a> (entre com o usuário e a senha que você acabou de criar).</li>
     </ol>
+    <pre style="background:#0b0e16;border:1px solid var(--line);padding:10px;border-radius:8px;font-size:12px;overflow:auto;color:#cbd5e1">{ "key": "bxs_...", "url": "https://...", "site": "Meu Jogo" }</pre>
     <div class="note">Você já está logado. Para rever a chave depois, entre no Monitor.</div>
     <button onclick="location.href='/monitor.html'">Abrir meu Monitor</button>
   </div>

@@ -21,8 +21,9 @@ Pronto: já está protegendo. Não precisa instalar mais nada.
 
 ### Ligar o painel de monitoramento (opcional, recomendado)
 
-O dono do sistema (Protection BLUEX) vai te passar **uma chave** e um **usuário/senha**.
-No Render → seu serviço → **Environment**, crie:
+O dono do sistema (Protection BLUEX) vai te passar um arquivo **`config.json`** (ou uma chave) e um **usuário/senha**.
+**Hospedagem própria (PC/VPS):** use o arquivo **`config.json`** que o dono enviar, dentro da pasta `bluex-shield` (veja o item 9 para Windows).
+**Render/Heroku:** em vez do arquivo, crie estas variáveis de ambiente:
 
 | Variável | Valor |
 |---|---|
@@ -124,3 +125,51 @@ Crie a variável de ambiente **`BLUEX_SHIELD`** com valor **`off`** e reinicie. 
 **Vi "429" nos logs.** Normal: é o Shield recusando IPs que passaram do limite.
 **Um jogador reclamou que está bloqueado.** Peça o IP dele, procure no painel em "IPs derrubados" e clique **Liberar**.
 **Quero ver o que está acontecendo.** Painel: `/monitor.html` do Protection BLUEX → gráfico por minuto, IPs abusivos, IPs derrubados e eventos.
+
+---
+
+## 9. 🪟 Guia para PC com Windows (hospedagem na própria máquina)
+
+O Shield é Node.js e funciona igual no Windows. Passo a passo:
+
+### 9.1 Instalar
+1. Abra a pasta do seu jogo no **Explorador de Arquivos** (onde está o `server.js`).
+2. Cole a pasta **`bluex-shield`** ali dentro (ao lado do `server.js`).
+3. Abra o `server.js` no Bloco de Notas/VS Code e coloque na **linha 1**:
+   ```js
+   require('./bluex-shield');
+   ```
+   Salve.
+4. **Vincular ao painel do dono:** ele vai te enviar um arquivo **`config.json`**. Coloque-o **dentro da pasta `bluex-shield`** (junto do `core.js`). Não precisa de variável de ambiente.
+5. Reinicie o jogo. No terminal (Prompt de Comando/PowerShell) deve aparecer:
+   ```
+   [BLUEX SHIELD] 🔗 vinculado ao Protection BLUEX como "Nome do jogo".
+   [BLUEX SHIELD] 🛡️ ativo (modo automático).
+   ```
+   Pronto: o dono já vê seu site **🟢 conectado** no painel dele — e **sabe qual site começou** quando as requisições subirem.
+
+### 9.2 Manter o jogo sempre ligado (recomendado)
+Se você roda com `node server.js` numa janela, fechar a janela derruba o jogo. Use o **PM2**:
+```
+npm install -g pm2
+pm2 start server.js --name meu-jogo
+pm2 save
+```
+Para reiniciar depois de editar: `pm2 restart meu-jogo` · Ver o log do Shield: `pm2 logs meu-jogo`.
+Para iniciar com o Windows, use o **Agendador de Tarefas** (tarefa "Ao iniciar o computador" rodando `pm2 resurrect`) ou o serviço **NSSM**.
+
+### 9.3 Desligar em emergência (Windows)
+- **PowerShell:** `$env:BLUEX_SHIELD="off"; pm2 restart meu-jogo --update-env`
+- ou, para terminal comum: `set BLUEX_SHIELD=off` e depois `node server.js`.
+
+### 9.4 Seu IP e o roteador (PC de casa)
+- Se o jogo está acessível pela internet, o roteador tem **redirecionamento de porta** para o seu PC. O Shield enxerga o **IP real** de quem conecta.
+- Se você usa **Cloudflare Tunnel** ou **ngrok** na mesma máquina, o Shield já entende (lê o IP real pelo cabeçalho).
+- Coloque o **seu próprio IP** na lista `allowlist` (item 6) para nunca se bloquear.
+
+### 9.5 Reforço extra no Windows (opcional)
+- O **Firewall do Windows** pode bloquear um IP à mão (PowerShell como administrador):
+  `New-NetFirewallRule -DisplayName "Bloquear 1.2.3.4" -Direction Inbound -RemoteAddress 1.2.3.4 -Action Block`
+  Isso corta o IP **antes** de chegar ao jogo (útil em ataque grande). Para remover: `Remove-NetFirewallRule -DisplayName "Bloquear 1.2.3.4"`.
+- Ataque gigante saturando a **sua internet de casa** não é resolvido por nenhum software no PC: aí é preciso a **Cloudflare** na frente (grátis) — fale com o dono pelo painel.
+- Antivírus pode reclamar de "muitas conexões" durante ataque: é normal, não desative o Shield.

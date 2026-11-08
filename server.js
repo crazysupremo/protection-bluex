@@ -171,10 +171,19 @@ app.post(
     // prioridade. Enquanto ninguém trocou ainda, cai de volta pra
     // ADMIN_PASSWORD (variável de ambiente) — é só o bootstrap do primeiro
     // acesso.
-    const stored = await db.get('SELECT password_hash FROM admin_settings WHERE id = 1');
+    let stored = await db.get('SELECT password_hash FROM admin_settings WHERE id = 1');
+    // RECUPERAÇÃO: esqueceu a senha trocada no painel? No Render, crie a variável
+    // ADMIN_RESET=1 (com ADMIN_PASSWORD preenchida), faça o deploy e entre com a
+    // senha do ADMIN_PASSWORD. Isso apaga a senha antiga do banco. Depois remova ADMIN_RESET.
+    if (stored && ADMIN_PASSWORD && String(process.env.ADMIN_RESET || '') === '1' && passwordMatches(password, ADMIN_PASSWORD)) {
+      await db.run('DELETE FROM admin_settings WHERE id = 1');
+      stored = null;
+    }
     let ok;
     if (stored) {
-      ok = verifyHashedPassword(password, stored.password_hash);
+      // A senha mestra do Render (ADMIN_PASSWORD) SEMPRE funciona também — assim, se
+      // esquecer a senha trocada no painel, basta usar/alterar a variável no Render.
+      ok = verifyHashedPassword(password, stored.password_hash) || (!!ADMIN_PASSWORD && passwordMatches(password, ADMIN_PASSWORD));
     } else if (ADMIN_PASSWORD) {
       ok = passwordMatches(password, ADMIN_PASSWORD);
     } else {
